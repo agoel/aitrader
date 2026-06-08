@@ -1,0 +1,81 @@
+# Historical macro news — primary sources for dated backtest corpus.
+# Yahoo Finance headlines are recent-only; use these for depth.
+
+sources:
+  gdelt_gkg:
+    enabled: true
+    # GDELT GKG 2.0 bulk files — full archive back to Feb 2015 (sampled).
+    lookback_days: 1825
+    sample_days: 7
+    sample_hour_utc: 12
+    max_per_file: 80
+    rate_limit_s: 0.25
+    master_url: "http://data.gdeltproject.org/gdeltv2/masterfilelist.txt"
+
+  gdelt_doc:
+    enabled: true
+    api_base: "https://api.gdeltproject.org/api/v2/doc/doc"
+    # Rolling window: last 3 months (Jan 2017+); rate limit ~1 req / 5s.
+    rate_limit_s: 6.0
+    maxrecords_per_query: 250
+    sort: DateDesc
+    queries:
+      - id: fed_rates
+        query: '(theme:ECON_STOCKMARKET OR theme:ECON_INTERESTRATES OR "federal reserve" OR "interest rate")'
+        tags: [fed, rates, macro]
+      - id: inflation
+        query: '(theme:ECON_INFLATION OR inflation OR "consumer price" OR CPI)'
+        tags: [inflation, macro]
+      - id: employment
+        query: '(theme:ECON_UNEMPLOYMENT OR unemployment OR "nonfarm payroll" OR "jobs report")'
+        tags: [employment, macro]
+      - id: earnings
+        query: '(theme:ECON_STOCKMARKET OR "earnings report" OR "corporate earnings" OR guidance)'
+        tags: [earnings, macro]
+      - id: trade_tariff
+        query: '(tariff OR "trade war" OR sanctions OR theme:ECON_TRADE)'
+        tags: [tariff, trade, macro]
+
+  google_news_rss:
+    enabled: true
+    # Google News search RSS — ~1 year depth per query; no API key.
+    rate_limit_s: 1.0
+    feeds:
+      - id: gnews_fed_inflation
+        name: Google News — Fed & inflation
+        url: "https://news.google.com/rss/search?q=federal+reserve+OR+inflation+when:1y&hl=en-US&gl=US&ceid=US:en"
+        tags: [macro, fed, inflation]
+      - id: gnews_earnings_markets
+        name: Google News — earnings & markets
+        url: "https://news.google.com/rss/search?q=earnings+OR+stock+market+when:1y&hl=en-US&gl=US&ceid=US:en"
+        tags: [macro, earnings]
+      - id: gnews_jobs_cpi
+        name: Google News — jobs & CPI
+        url: "https://news.google.com/rss/search?q=jobs+report+OR+CPI+when:1y&hl=en-US&gl=US&ceid=US:en"
+        tags: [macro, employment, inflation]
+      - id: gnews_tariffs_trade
+        name: Google News — tariffs & trade
+        url: "https://news.google.com/rss/search?q=tariff+OR+trade+war+when:1y&hl=en-US&gl=US&ceid=US:en"
+        tags: [macro, tariff, trade]
+      - id: gnews_reuters_macro
+        name: Google News — Reuters macro
+        url: "https://news.google.com/rss/search?q=when:1y+allinurl:reuters.com+(economy+OR+markets+OR+fed)&hl=en-US&gl=US&ceid=US:en"
+        tags: [macro, reuters]
+
+  rss_archive:
+    enabled: true
+    config: news_feeds.yaml
+    window_days: 365
+
+  gdelt_bigquery:
+    enabled: false
+    project: null
+    dataset: gdelt-bq.gdeltv2.gkg_partitioned
+    note: "Optional SQL export for dense daily coverage; GKG bulk above is default."
+
+  internet_archive:
+    enabled: false
+    note: "Optional: CDX API for archived macro URLs from RSS links — future slice."
+
+# Future indicator (not a news substitute):
+# momentum — separate L4+ indicator; no momentum-only fallback when news_articles=0.

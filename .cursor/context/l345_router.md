@@ -107,6 +107,7 @@ git_mr_guidelines.md: Sections
 | Alpha harness (local API) | pattern | `lsai_e2e.md` | `## Alpha harness for local API testing (pattern)` | Localhost interstitial loop, `run_rest`-style |
 | Beta / staging remote ops | pattern | `lsai_e2e.md` | `## Beta / staging — remote operations recipe (pattern)` | Deploy, babysit, remote logs on staging |
 | Recipe structure & composition | meta | `lsai_subagents.md` | `Recipe of Recipes` → **DRY**, **Parent and child recipes**, **Formal parameters** | Authoring, splitting, citing recipes |
+| Slice-first performance gate (data pipelines) | recipe | `lsai_subagents.md` | `## Recipe — Slice-first performance gate (data pipelines)` | Profile small slice, fix hot path, then full batch |
 | Router Builder | meta | `lsai_superagent.md` | `Router Architecture and Builder` → **Router Builder Recipe** | L4 topic index generation |
 
 **Run:** Match user goal → row above → load owner section only. **Verify:** No new inline procedure duplicates an indexed **Run** block without a child-recipe cite.

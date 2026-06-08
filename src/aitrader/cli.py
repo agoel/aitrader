@@ -1,4 +1,4 @@
-"""AITrader CLI — L1/L2/L3 scaffold."""
+"""AITrader CLI — L1/L2/L3/L4 scaffold."""
 
 from __future__ import annotations
 
@@ -8,18 +8,33 @@ from pathlib import Path
 
 from aitrader.data.yahoo import ingest_universe
 from aitrader.ml.drift import run_drift_detection
+from aitrader.ml.backtest import run_prediction_backtest
+from aitrader.ml.portfolio_backtest import run_spy_portfolio_backtest
+from aitrader.ml.rsi_predict import run_prediction_rsi
+from aitrader.ml.predict import run_predictions, train_horizon_models
 from aitrader.nlp.cluster import fit_news_clusters
 from aitrader.nlp.keywords import discover_sector_keywords
 from aitrader.nlp.cursor_extract import (
     apply_all_cursor_batches,
     apply_cursor_batch,
     fill_cursor_batches,
+    fill_pending_keywords,
     finalize_cursor_keywords,
     prepare_cursor_batches,
 )
-from aitrader.nlp.news import ingest_news
+from aitrader.nlp.news import ingest_historical_news, ingest_news
 from aitrader.universe import write_universe
+from aitrader.progress import pipeline_phase
 from aitrader.workspace import ensure_run_layout, update_meta
+
+
+def _add_quiet(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--quiet",
+        "-q",
+        action="store_true",
+        help="Suppress progress lines (status file still updated)",
+    )
 
 DEFAULT_RUN_DIR = Path.home() / "data" / "aitrader" / "runs" / "agoel_stack-bootstrap_20260607-193720"
 
@@ -70,6 +85,21 @@ def _cmd_news_ingest(args: argparse.Namespace) -> None:
     print(f"Wrote {path} ({count} articles)")
 
 
+def _cmd_news_ingest_historical(args: argparse.Namespace) -> None:
+    path, count = ingest_historical_news(
+        args.run_dir,
+        timespan=args.timespan,
+        rss_window_days=args.rss_window_days,
+        include_gdelt=not args.no_gdelt,
+        include_gkg=not args.no_gkg,
+        include_gnews=not args.no_gnews,
+        include_rss=not args.no_rss,
+        gkg_lookback_days=args.gkg_lookback_days,
+        gkg_sample_days=args.gkg_sample_days,
+    )
+    print(f"Historical ingest → {path} ({count} new articles this pass)")
+
+
 def _cmd_keywords_prepare_cursor(args: argparse.Namespace) -> None:
     batches_dir, count = prepare_cursor_batches(
         args.run_dir,
@@ -87,27 +117,75 @@ def _cmd_keywords_apply_cursor(args: argparse.Namespace) -> None:
 
 
 def _cmd_keywords_apply_all_cursor(args: argparse.Namespace) -> None:
-    total, applied = apply_all_cursor_batches(args.run_dir)
+    total, applied = apply_all_cursor_batches(
+        args.run_dir,
+        workers=getattr(args, "workers", None),
+        quiet=args.quiet,
+    )
     print(f"Applied {len(applied)} batches ({total} articles): {applied}")
 
 
 def _cmd_keywords_fill_cursor(args: argparse.Namespace) -> None:
-    filled, articles = fill_cursor_batches(args.run_dir, overwrite=args.overwrite)
+    if args.pending_only:
+        filled, path = fill_pending_keywords(
+            args.run_dir,
+            workers=getattr(args, "workers", None),
+            quiet=args.quiet,
+        )
+        print(f"Parallel fill: {filled} uncached articles → {path}")
+        return
+    filled, articles = fill_cursor_batches(
+        args.run_dir,
+        overwrite=args.overwrite,
+        workers=getattr(args, "workers", None),
+        quiet=args.quiet,
+    )
     print(f"Filled {filled} batch outputs ({articles} articles)")
 
 
 def _cmd_keywords_run_cursor(args: argparse.Namespace) -> None:
-    """Prepare → fill (agent policy) → apply-all → finalize → discover."""
-    prepare_cursor_batches(
-        args.run_dir,
-        batch_size=args.batch_size,
-        limit=args.limit,
-        force=args.force,
-    )
+    """Prepare → parallel fill → apply-all → finalize → discover."""
+    run = args.run_dir
+    quiet = args.quiet
+    steps = 5 if args.fill else 3
+    with pipeline_phase(run, "keywords.run-cursor", "prepare_batches", 1, steps, quiet=quiet):
+        batches, n_batches = prepare_cursor_batches(
+            run,
+            batch_size=args.batch_size,
+            limit=args.limit,
+            force=args.force,
+        )
+        if not quiet:
+            print(f"Prepared {n_batches} batches under {batches}")
     if args.fill:
-        fill_cursor_batches(args.run_dir, overwrite=args.force)
-    total, applied = apply_all_cursor_batches(args.run_dir)
-    print(f"Applied {len(applied)} batches ({total} articles) with existing *_out.json")
+        with pipeline_phase(run, "keywords.run-cursor", "fill_pending", 2, steps, quiet=quiet):
+            n, _ = fill_pending_keywords(
+                run,
+                workers=getattr(args, "workers", None),
+                quiet=quiet,
+            )
+            if not quiet:
+                print(f"Parallel keyword extract: {n} uncached articles")
+        with pipeline_phase(run, "keywords.run-cursor", "fill_batches", 3, steps, quiet=quiet):
+            fill_cursor_batches(
+                run,
+                overwrite=args.force,
+                workers=getattr(args, "workers", None),
+                quiet=quiet,
+            )
+        step_apply = 4
+    else:
+        step_apply = 2
+    total = 0
+    applied: list[int] = []
+    with pipeline_phase(run, "keywords.run-cursor", "apply_batches", step_apply, steps, quiet=quiet):
+        total, applied = apply_all_cursor_batches(
+            run,
+            workers=getattr(args, "workers", None),
+            quiet=quiet,
+        )
+        if not quiet:
+            print(f"Applied {len(applied)} batches ({total} articles)")
     if total == 0:
         print(
             "No batch_*_out.json files yet. Cursor agent must write outputs, then re-run:\n"
@@ -116,8 +194,24 @@ def _cmd_keywords_run_cursor(args: argparse.Namespace) -> None:
             "  python -m aitrader keywords discover --run-dir <run>"
         )
         return
-    _cmd_keywords_finalize_cursor(args)
-    _cmd_keywords_discover(args)
+    with pipeline_phase(
+        run,
+        "keywords.run-cursor",
+        "finalize",
+        step_apply + 1,
+        steps,
+        quiet=quiet,
+    ):
+        _cmd_keywords_finalize_cursor(args)
+    with pipeline_phase(
+        run,
+        "keywords.run-cursor",
+        "discover",
+        steps,
+        steps,
+        quiet=quiet,
+    ):
+        _cmd_keywords_discover(args)
 
 
 def _cmd_keywords_finalize_cursor(args: argparse.Namespace) -> None:
@@ -144,6 +238,8 @@ def _cmd_keywords_discover(args: argparse.Namespace) -> None:
         label_horizon=args.horizon,
         min_keyword_ic=args.min_ic,
         use_llm=not args.no_llm,
+        workers=getattr(args, "workers", None),
+        quiet=args.quiet,
     )
     print(f"Wrote {len(paths)} keyword maps")
     print(f"Wrote {report}")
@@ -170,6 +266,77 @@ def _cmd_cluster_fit(args: argparse.Namespace) -> None:
     print(f"Wrote {model}")
     print(f"Wrote {current}")
     print(f"Wrote {report}")
+
+
+def _cmd_predict_run(args: argparse.Namespace) -> None:
+    path = run_predictions(
+        args.run_dir,
+        horizons=tuple(args.horizons.split(",")),
+        news_window_days=args.window_days,
+        retrain=args.retrain,
+    )
+    print(f"Wrote {path}")
+
+
+def _cmd_predict_backtest(args: argparse.Namespace) -> None:
+    csv_path, report = run_prediction_backtest(
+        args.run_dir,
+        horizons=tuple(args.horizons.split(",")),
+        news_window_days=args.window_days,
+        min_train_days=args.min_train_days,
+        include_monthly_spy=not args.no_monthly_spy,
+        include_walk_forward=args.walk_forward,
+        quiet=args.quiet,
+    )
+    print(f"Wrote {csv_path}")
+    print(f"Wrote {report}")
+
+
+def _cmd_portfolio_backtest_spy(args: argparse.Namespace) -> None:
+    ledger, report, summary = run_spy_portfolio_backtest(
+        args.run_dir,
+        capital_usd=args.capital_usd,
+        lookback_years=args.years,
+        news_window_days=args.window_days,
+        min_train_months=args.min_train_months,
+    )
+    print(f"Wrote {ledger}")
+    print(f"Wrote {report}")
+    print(
+        f"Strategy: ${summary['final_value_usd']:,.2f} ({summary['total_return_pct']:+.2f}%) "
+        f"vs buy-hold ${summary['buy_hold_final_usd']:,.2f} "
+        f"({summary['buy_hold_return_pct']:+.2f}%) over {summary['months']} months"
+    )
+
+
+def _cmd_predict_train(args: argparse.Namespace) -> None:
+    models = train_horizon_models(args.run_dir, horizons=tuple(args.horizons.split(",")))
+    print(f"Trained {len(models)} horizon models")
+
+
+def _cmd_predict_rsi(args: argparse.Namespace) -> None:
+    summary = run_prediction_rsi(
+        args.run_dir,
+        max_rounds=args.max_rounds,
+        news_window_days=args.window_days,
+        use_grid=not args.no_grid,
+    )
+    print(json.dumps(summary, indent=2))
+    tier = summary.get("certainty", "low")
+    if summary.get("passes"):
+        print(f"RSI stop: certainty gates passed (tier={tier}).")
+    else:
+        print(f"RSI stop: max rounds — best config saved (tier={tier}).")
+
+
+def _cmd_l4(args: argparse.Namespace) -> None:
+    """Run L4: train → predict → backtest → RSI tune."""
+    _cmd_predict_run(args)
+    if not args.skip_backtest:
+        _cmd_predict_backtest(args)
+    if not args.skip_rsi:
+        _cmd_predict_rsi(args)
+    print("L4 complete.")
 
 
 def _cmd_l3(args: argparse.Namespace) -> None:
@@ -249,6 +416,21 @@ def main(argv: list[str] | None = None) -> None:
     ingest_p.add_argument("--yahoo-universe", action="store_true", help="Fetch Yahoo news for full universe")
     ingest_p.set_defaults(func=_cmd_news_ingest)
 
+    hist_p = news_sub.add_parser(
+        "ingest-historical",
+        help="Ingest dated historical macro news (GKG bulk + GDELT + Google News + RSS)",
+    )
+    _add_run_dir(hist_p)
+    hist_p.add_argument("--timespan", default="90days", help="GDELT DOC timespan (max ~3 months)")
+    hist_p.add_argument("--rss-window-days", type=int, default=365)
+    hist_p.add_argument("--gkg-lookback-days", type=int, default=None, help="GKG bulk days (default 1825)")
+    hist_p.add_argument("--gkg-sample-days", type=int, default=None, help="GKG sample every N days (default 7)")
+    hist_p.add_argument("--no-gkg", action="store_true", help="Skip GDELT GKG bulk backfill")
+    hist_p.add_argument("--no-gdelt", action="store_true", help="Skip GDELT DOC API")
+    hist_p.add_argument("--no-gnews", action="store_true", help="Skip Google News macro RSS")
+    hist_p.add_argument("--no-rss", action="store_true")
+    hist_p.set_defaults(func=_cmd_news_ingest_historical)
+
     kw_p = sub.add_parser("keywords", help="Keyword discovery commands")
     kw_sub = kw_p.add_subparsers(dest="kw_cmd", required=True)
     prep_p = kw_sub.add_parser(
@@ -273,6 +455,13 @@ def main(argv: list[str] | None = None) -> None:
     _add_run_dir(apply_all_p)
     apply_all_p.add_argument("--horizon", default="1m", choices=["2w", "1m", "3m"])
     apply_all_p.add_argument("--min-ic", type=float, default=0.03)
+    apply_all_p.add_argument(
+        "--workers",
+        type=int,
+        default=None,
+        help="Parallel workers for batch apply (default: min(8, cpu_count))",
+    )
+    _add_quiet(apply_all_p)
     apply_all_p.set_defaults(func=_cmd_keywords_apply_all_cursor)
 
     run_p = kw_sub.add_parser(
@@ -293,6 +482,13 @@ def main(argv: list[str] | None = None) -> None:
     run_p.add_argument("--horizon", default="1m", choices=["2w", "1m", "3m"])
     run_p.add_argument("--min-ic", type=float, default=0.03)
     run_p.add_argument("--no-llm", action="store_true", help="Token fallback only at discover step")
+    run_p.add_argument(
+        "--workers",
+        type=int,
+        default=None,
+        help="Parallel workers for fill/apply (default: min(8, cpu_count))",
+    )
+    _add_quiet(run_p)
     run_p.set_defaults(func=_cmd_keywords_run_cursor, no_llm=False)
 
     fill_p = kw_sub.add_parser(
@@ -301,6 +497,13 @@ def main(argv: list[str] | None = None) -> None:
     )
     _add_run_dir(fill_p)
     fill_p.add_argument("--overwrite", action="store_true")
+    fill_p.add_argument(
+        "--pending-only",
+        action="store_true",
+        help="Parallel extract for uncached corpus only (fast path)",
+    )
+    fill_p.add_argument("--workers", type=int, default=None)
+    _add_quiet(fill_p)
     fill_p.set_defaults(func=_cmd_keywords_fill_cursor)
 
     fin_p = kw_sub.add_parser("finalize-cursor", help="Summarize Cursor keyword extraction progress")
@@ -327,6 +530,13 @@ def main(argv: list[str] | None = None) -> None:
         action="store_true",
         help="Skip Cursor keyword cache; use token extraction only",
     )
+    disc_p.add_argument(
+        "--workers",
+        type=int,
+        default=None,
+        help="Parallel sector workers for IC discovery (default: min(8, cpu_count))",
+    )
+    _add_quiet(disc_p)
     disc_p.set_defaults(func=_cmd_keywords_discover)
 
     l2_p = sub.add_parser("l2", help="Run L2 end-to-end (news + keywords)")
@@ -370,6 +580,79 @@ def main(argv: list[str] | None = None) -> None:
     l3_p.add_argument("--horizon", default="1m", choices=["2w", "1m", "3m"])
     l3_p.add_argument("--min-ic", type=float, default=0.03)
     l3_p.set_defaults(func=_cmd_l3)
+
+    predict_p = sub.add_parser("predict", help="Multi-horizon prediction commands")
+    predict_sub = predict_p.add_subparsers(dest="predict_cmd", required=True)
+    predict_run_p = predict_sub.add_parser("run", help="Score universe at 2w/1m/3m horizons")
+    _add_run_dir(predict_run_p)
+    predict_run_p.add_argument("--horizons", default="2w,1m,3m")
+    predict_run_p.add_argument("--window-days", type=int, default=7)
+    predict_run_p.add_argument("--retrain", action="store_true", help="Force retrain horizon models")
+    predict_run_p.set_defaults(func=_cmd_predict_run)
+
+    predict_train_p = predict_sub.add_parser("train", help="Train per-horizon Ridge models only")
+    _add_run_dir(predict_train_p)
+    predict_train_p.add_argument("--horizons", default="2w,1m,3m")
+    predict_train_p.set_defaults(func=_cmd_predict_train)
+
+    predict_bt_p = predict_sub.add_parser(
+        "backtest",
+        help="Walk-forward backtest: keyword/cluster sentiment vs realized returns",
+    )
+    _add_run_dir(predict_bt_p)
+    predict_bt_p.add_argument("--horizons", default="2w,1m,3m")
+    predict_bt_p.add_argument("--window-days", type=int, default=7)
+    predict_bt_p.add_argument("--min-train-days", type=int, default=3)
+    predict_bt_p.add_argument(
+        "--no-monthly-spy",
+        action="store_true",
+        help="Skip monthly SPY walk-forward (OHLCV + point-in-time news)",
+    )
+    predict_bt_p.add_argument(
+        "--walk-forward",
+        action="store_true",
+        help="Also run article-level walk-forward (slow on large corpus)",
+    )
+    _add_quiet(predict_bt_p)
+    predict_bt_p.set_defaults(func=_cmd_predict_backtest)
+
+    predict_rsi_p = predict_sub.add_parser(
+        "rsi",
+        help="RSI loop: tune prediction config until backtest certainty gates pass",
+    )
+    _add_run_dir(predict_rsi_p)
+    predict_rsi_p.add_argument("--window-days", type=int, default=30)
+    predict_rsi_p.add_argument(
+        "--max-rounds",
+        type=int,
+        default=0,
+        help="Max configs to try (0 = full grid)",
+    )
+    predict_rsi_p.add_argument("--no-grid", action="store_true")
+    predict_rsi_p.set_defaults(func=_cmd_predict_rsi)
+
+    predict_pf_p = predict_sub.add_parser(
+        "portfolio-backtest",
+        help="SPY-only $10K portfolio simulation from monthly news predictions (5y)",
+    )
+    _add_run_dir(predict_pf_p)
+    predict_pf_p.add_argument("--capital-usd", type=float, default=10000)
+    predict_pf_p.add_argument("--years", type=int, default=5, help="Lookback years for month-ends")
+    predict_pf_p.add_argument("--window-days", type=int, default=30)
+    predict_pf_p.add_argument("--min-train-months", type=int, default=12)
+    predict_pf_p.set_defaults(func=_cmd_portfolio_backtest_spy)
+
+    l4_p = sub.add_parser("l4", help="Run L4 end-to-end (predict + backtest + RSI)")
+    _add_run_dir(l4_p)
+    l4_p.add_argument("--horizons", default="2w,1m,3m")
+    l4_p.add_argument("--window-days", type=int, default=7)
+    l4_p.add_argument("--retrain", action="store_true")
+    l4_p.add_argument("--min-train-days", type=int, default=3)
+    l4_p.add_argument("--no-monthly-spy", action="store_true")
+    l4_p.add_argument("--skip-backtest", action="store_true")
+    l4_p.add_argument("--skip-rsi", action="store_true")
+    l4_p.add_argument("--max-rounds", type=int, default=5)
+    l4_p.set_defaults(func=_cmd_l4)
 
     args = parser.parse_args(argv)
     args.func(args)

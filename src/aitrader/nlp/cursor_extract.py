@@ -15,6 +15,8 @@ from aitrader.nlp.keyword_cache import (
     normalize_keywords,
     phrase_grounded,
 )
+from aitrader.nlp.parallel import default_workers, parallel_map
+from aitrader.progress import RunProgress, parallel_map_progress
 from aitrader.nlp.news import load_corpus
 from aitrader.workspace import ensure_run_layout, update_meta
 
@@ -323,26 +325,143 @@ def apply_cursor_batch(run_dir: str | Path, batch_index: int) -> tuple[int, Path
     return len(rows), cache_path
 
 
-def fill_cursor_batches(run_dir: str | Path, *, overwrite: bool = False) -> tuple[int, int]:
-    """Cursor agent: write batch_*_out.json from batch_*_in.json using macro policy."""
+def _keywords_for_article_dict(art: dict[str, Any]) -> list[str]:
+    kws = suggest_macro_keywords(art)
+    return normalize_keywords(kws, art.get("title", ""), art.get("body", ""))
+
+
+def _fill_batch_args(args: tuple[str, bool]) -> tuple[int, int, str] | None:
+    in_path_str, overwrite = args
+    return _fill_batch_in_path(in_path_str, overwrite=overwrite)
+
+
+def _fill_batch_in_path(in_path_str: str, *, overwrite: bool) -> tuple[int, int, str] | None:
+    """Worker: fill one batch_*_in.json → batch_*_out.json. Returns (batch_index, n, out_path)."""
+    in_path = Path(in_path_str)
+    batch_index = int(in_path.stem.split("_")[1])
+    out_path = in_path.parent / f"batch_{batch_index:03d}_out.json"
+    if out_path.exists() and not overwrite:
+        return None
+    data = json.loads(in_path.read_text())
+    outs = []
+    for art in data.get("articles", []):
+        phrases = _keywords_for_article_dict(art)
+        outs.append({"id": art["id"], "keywords": phrases})
+    out_path.write_text(
+        json.dumps({"batch_index": batch_index, "articles": outs}, indent=2) + "\n"
+    )
+    return batch_index, len(outs), str(out_path)
+
+
+def fill_cursor_batches(
+    run_dir: str | Path,
+    *,
+    overwrite: bool = False,
+    workers: int | None = None,
+    quiet: bool = False,
+) -> tuple[int, int]:
+    """Cursor agent: write batch_*_out.json from batch_*_in.json using macro policy (parallel)."""
     root = ensure_run_layout(run_dir)
     batches = cursor_batches_dir(root)
+    in_paths = sorted(batches.glob("batch_*_in.json"))
+    if not in_paths:
+        return 0, 0
+
+    w = default_workers(workers)
+    job_args = [(str(p), overwrite) for p in in_paths]
+    prog = RunProgress(
+        "fill-cursor-batches",
+        len(job_args),
+        run_dir=root,
+        pipeline="keywords.run-cursor",
+        phase="fill_batches",
+        quiet=quiet,
+        every=max(1, len(job_args) // 20),
+    )
+    if w <= 1:
+        prog.start()
+        results = []
+        for a in job_args:
+            results.append(_fill_batch_args(a))
+            prog.advance(1)
+        prog.finish()
+    else:
+        results = parallel_map_progress(_fill_batch_args, job_args, prog, workers=w)
+
     filled = 0
     articles = 0
-    for in_path in sorted(batches.glob("batch_*_in.json")):
-        batch_index = int(in_path.stem.split("_")[1])
-        out_path = batches / f"batch_{batch_index:03d}_out.json"
-        if out_path.exists() and not overwrite:
+    for row in results:
+        if row is None:
             continue
-        data = json.loads(in_path.read_text())
-        outs = []
-        for art in data.get("articles", []):
-            kws = suggest_macro_keywords(art)
-            outs.append({"id": art["id"], "keywords": kws})
-            articles += 1
-        write_cursor_batch_output(root, batch_index, outs)
+        _, n, _ = row
         filled += 1
+        articles += n
     return filled, articles
+
+
+def _cache_row_from_article(args: tuple[dict[str, Any], str]) -> dict[str, Any]:
+    art, today = args
+    phrases = _keywords_for_article_dict(art)
+    if not phrases:
+        title = art.get("title", "")
+        body = art.get("body", "")
+        phrases = normalize_keywords([title[:80].lower()], title, body)
+    return {
+        "id": art["id"],
+        "keywords": phrases,
+        "source": "cursor-agent",
+        "prompt_version": PROMPT_VERSION,
+        "batch_index": 0,
+        "extracted_at": today,
+    }
+
+
+def fill_pending_keywords(
+    run_dir: str | Path,
+    *,
+    workers: int | None = None,
+    chunk_size: int = 500,
+    quiet: bool = False,
+) -> tuple[int, Path]:
+    """Parallel keyword extraction for uncached corpus articles (skips batch files)."""
+    root = ensure_run_layout(run_dir)
+    corpus = load_corpus(root)
+    cache = load_keyword_cache(root)
+    pending = [a for a in corpus if a["id"] not in cache]
+    if not pending:
+        return 0, root / "data" / "news" / "llm_keywords.jsonl"
+
+    today = datetime.now(timezone.utc).isoformat()
+    w = default_workers(workers)
+    job_args = [(art, today) for art in pending]
+
+    prog = RunProgress(
+        "fill-pending-keywords",
+        len(job_args),
+        run_dir=root,
+        pipeline="keywords.run-cursor",
+        phase="fill_pending",
+        quiet=quiet,
+        every=max(1, len(job_args) // 50),
+    )
+    n_chunks = max(1, (len(job_args) + chunk_size - 1) // chunk_size)
+    rows: list[dict[str, Any]] = []
+    prog.start(f"{len(job_args)} articles in {n_chunks} chunks")
+    for ci, i in enumerate(range(0, len(job_args), chunk_size), start=1):
+        chunk = job_args[i : i + chunk_size]
+        if w <= 1:
+            for a in chunk:
+                rows.append(_cache_row_from_article(a))
+        else:
+            rows.extend(parallel_map(_cache_row_from_article, chunk, workers=w))
+        prog.advance(
+            len(chunk),
+            message=f"chunk {ci}/{n_chunks}",
+        )
+    prog.finish(f"{len(rows)} articles cached")
+
+    path = append_keyword_cache(root, rows)
+    return len(rows), path
 
 
 def write_cursor_batch_output(
@@ -359,8 +478,47 @@ def write_cursor_batch_output(
     return out_path
 
 
-def apply_all_cursor_batches(run_dir: str | Path) -> tuple[int, list[int]]:
-    """Apply every batch that has *_out.json and is not already in manifest."""
+def _read_batch_pair(pair: tuple[str, str]) -> tuple[int, list[dict[str, Any]]]:
+    return _read_batch_cache_rows(pair[0], pair[1])
+
+
+def _read_batch_cache_rows(in_path_str: str, out_path_str: str) -> tuple[int, list[dict[str, Any]]]:
+    """Worker: parse one batch pair into cache rows."""
+    in_path = Path(in_path_str)
+    out_path = Path(out_path_str)
+    batch_index = int(in_path.stem.split("_")[1])
+    data = json.loads(out_path.read_text())
+    articles_in = {a["id"]: a for a in json.loads(in_path.read_text()).get("articles", [])}
+    today = datetime.now(timezone.utc).isoformat()
+    rows: list[dict[str, Any]] = []
+    for entry in data.get("articles", []):
+        art_id = str(entry.get("id", ""))
+        src = articles_in.get(art_id, {})
+        kws = normalize_keywords(
+            entry.get("keywords", []),
+            src.get("title", ""),
+            src.get("body", ""),
+        )
+        rows.append(
+            {
+                "id": art_id,
+                "keywords": kws,
+                "source": "cursor-agent",
+                "prompt_version": PROMPT_VERSION,
+                "batch_index": batch_index,
+                "extracted_at": today,
+            }
+        )
+    return batch_index, rows
+
+
+def apply_all_cursor_batches(
+    run_dir: str | Path,
+    *,
+    workers: int | None = None,
+    quiet: bool = False,
+) -> tuple[int, list[int]]:
+    """Apply every batch that has *_out.json and is not already in manifest (parallel read)."""
     root = ensure_run_layout(run_dir)
     batches = cursor_batches_dir(root)
     manifest_path = batches / "manifest.json"
@@ -368,8 +526,8 @@ def apply_all_cursor_batches(run_dir: str | Path) -> tuple[int, list[int]]:
     if manifest_path.exists():
         manifest = json.loads(manifest_path.read_text())
     done = set(manifest.get("batches_done", []))
-    applied: list[int] = []
-    total = 0
+
+    pairs: list[tuple[str, str]] = []
     for in_path in sorted(batches.glob("batch_*_in.json")):
         batch_index = int(in_path.stem.split("_")[1])
         if batch_index in done:
@@ -377,10 +535,56 @@ def apply_all_cursor_batches(run_dir: str | Path) -> tuple[int, list[int]]:
         out_path = batches / f"batch_{batch_index:03d}_out.json"
         if not out_path.exists():
             continue
-        n, _ = apply_cursor_batch(root, batch_index)
-        total += n
+        pairs.append((str(in_path), str(out_path)))
+
+    if not pairs:
+        return 0, []
+
+    w = default_workers(workers)
+    prog = RunProgress(
+        "apply-cursor-batches",
+        len(pairs),
+        run_dir=root,
+        pipeline="keywords.run-cursor",
+        phase="apply_batches",
+        quiet=quiet,
+        every=max(1, len(pairs) // 30),
+    )
+    if w <= 1:
+        prog.start()
+        parsed = []
+        for i, o in pairs:
+            parsed.append(_read_batch_cache_rows(i, o))
+            prog.advance(1)
+        prog.finish()
+    else:
+        parsed = parallel_map_progress(
+            _read_batch_pair, pairs, prog, workers=w, use_threads=True
+        )
+
+    all_rows: list[dict[str, Any]] = []
+    applied: list[int] = []
+    for batch_index, rows in parsed:
+        all_rows.extend(rows)
         applied.append(batch_index)
-    return total, applied
+
+    if all_rows:
+        append_keyword_cache(root, all_rows)
+
+    done.update(applied)
+    manifest["batches_done"] = sorted(done)
+    manifest_path.write_text(json.dumps(manifest, indent=2) + "\n")
+    update_meta(
+        root,
+        {
+            "cursor_keywords": {
+                "status": "in_progress" if applied else manifest.get("status", "done"),
+                "batches_done": len(done),
+                "last_batch": max(applied) if applied else None,
+            }
+        },
+    )
+    return len(all_rows), sorted(applied)
 
 
 def finalize_cursor_keywords(run_dir: str | Path) -> dict[str, Any]:

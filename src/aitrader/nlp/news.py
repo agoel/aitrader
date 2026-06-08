@@ -80,9 +80,10 @@ def fetch_rss_feed(feed: dict[str, Any], *, window_days: int = 7) -> list[NewsAr
     cutoff = datetime.now(timezone.utc) - timedelta(days=window_days)
     articles: list[NewsArticle] = []
     try:
-        root = ElementTree.fromstring(
-            __import__("urllib.request").urlopen(url, timeout=15).read()
-        )
+        import urllib.request
+
+        req = urllib.request.Request(url, headers={"User-Agent": "aitrader/0.1"})
+        root = ElementTree.fromstring(urllib.request.urlopen(req, timeout=15).read())
     except Exception:
         return articles
 
@@ -225,6 +226,82 @@ def load_corpus(run_dir: str | Path) -> list[dict[str, Any]]:
                 seen.add(row["id"])
                 articles.append(row)
     return articles
+
+
+def load_google_news_feeds(path: Path | None = None) -> list[dict[str, Any]]:
+    from aitrader.nlp.gdelt import load_historical_news_sources
+
+    cfg = load_historical_news_sources(path)
+    gnews = cfg.get("sources", {}).get("google_news_rss", {})
+    if not gnews.get("enabled", True):
+        return []
+    return list(gnews.get("feeds", []))
+
+
+def fetch_google_news_feeds(
+    *,
+    window_days: int = 400,
+    sources_path: Path | None = None,
+) -> list[NewsArticle]:
+    articles: list[NewsArticle] = []
+    for feed in load_google_news_feeds(sources_path):
+        articles.extend(fetch_rss_feed(feed, window_days=window_days))
+    return articles
+
+
+def ingest_historical_news(
+    run_dir: str | Path,
+    *,
+    timespan: str = "90days",
+    rss_window_days: int = 365,
+    include_gdelt: bool = True,
+    include_gkg: bool = True,
+    include_gnews: bool = True,
+    include_rss: bool = True,
+    gkg_lookback_days: int | None = None,
+    gkg_sample_days: int | None = None,
+) -> tuple[Path, int]:
+    """Ingest dated historical macro news (GKG bulk + GDELT DOC + Google News + RSS)."""
+    from aitrader.nlp.gdelt import ingest_gdelt_historical
+    from aitrader.nlp.gdelt_gkg import ingest_gdelt_gkg
+
+    root = ensure_run_layout(run_dir)
+    total = 0
+    last_path = root / "data" / "news" / "corpus.jsonl"
+
+    if include_rss:
+        path, count = ingest_news(
+            run_dir,
+            window_days=rss_window_days,
+            sources=["rss"],
+        )
+        last_path = path
+        total += count
+
+    if include_gnews:
+        gnews_arts = fetch_google_news_feeds(window_days=max(rss_window_days, 400))
+        if gnews_arts:
+            gnews_arts = dedupe_articles(gnews_arts)
+            write_news_jsonl(root, gnews_arts)
+            append_corpus_jsonl(root, gnews_arts)
+            total += len(gnews_arts)
+
+    if include_gkg:
+        kwargs: dict[str, Any] = {}
+        if gkg_lookback_days is not None:
+            kwargs["lookback_days"] = gkg_lookback_days
+        if gkg_sample_days is not None:
+            kwargs["sample_days"] = gkg_sample_days
+        path, count = ingest_gdelt_gkg(root, **kwargs)
+        last_path = path
+        total += count
+
+    if include_gdelt:
+        path, count = ingest_gdelt_historical(root, timespan=timespan)
+        last_path = path
+        total += count
+
+    return last_path, total
 
 
 def ingest_news(

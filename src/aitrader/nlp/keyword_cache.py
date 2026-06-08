@@ -75,8 +75,11 @@ def keywords_for_article(
     article: dict[str, Any],
     cache: dict[str, dict[str, Any]] | None,
 ) -> list[str]:
+    title = article.get("title", "")
+    body = article.get("body", "")
     if cache and article["id"] in cache:
-        return list(cache[article["id"]].get("keywords") or [])
+        raw = cache[article["id"]].get("keywords") or []
+        return normalize_keywords(raw, title, body)
     if article.get("llm_keywords"):
-        return list(article["llm_keywords"])
+        return normalize_keywords(list(article["llm_keywords"]), title, body)
     return []

@@ -19,3 +19,18 @@ feeds:
     name: U.S. Treasury — Press Releases
     url: https://home.treasury.gov/system/files/RSS/TreasuryPressReleases.xml
     tags: [macro, fiscal]
+
+  - id: sec_press
+    name: SEC — Press Releases
+    url: https://www.sec.gov/news/pressreleases.rss
+    tags: [macro, sec, earnings]
+
+  - id: ecb_press
+    name: European Central Bank — Press
+    url: https://www.ecb.europa.eu/rss/press.html
+    tags: [macro, ecb, rates]
+
+  - id: whitehouse_economy
+    name: White House — Economy
+    url: https://www.whitehouse.gov/feed/economy/
+    tags: [macro, policy]

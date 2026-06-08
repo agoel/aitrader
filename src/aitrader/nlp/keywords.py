@@ -6,7 +6,7 @@ import json
 import math
 import re
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -16,6 +16,8 @@ import yaml
 from aitrader.data.yahoo import ingest_ticker
 from aitrader.nlp.keyword_cache import keywords_for_article, load_keyword_cache as load_llm_keyword_cache
 from aitrader.nlp.news import ingest_news, load_corpus
+from aitrader.nlp.parallel import default_workers, parallel_map
+from aitrader.progress import RunProgress, parallel_map_progress
 from aitrader.workspace import ensure_run_layout
 
 HORIZON_TRADING_DAYS = {"2w": 10, "1m": 21, "3m": 63}
@@ -229,6 +231,28 @@ def _labels_from_corpus(
     return labels
 
 
+def _sample_corpus_for_discover(
+    corpus: list[dict[str, Any]],
+    *,
+    lookback_years: int = 5,
+    max_articles: int = 8000,
+) -> list[dict[str, Any]]:
+    """Limit discover to recent history so IC fit stays fast on large corpora."""
+    cutoff = (datetime.now(timezone.utc) - timedelta(days=lookback_years * 365)).strftime("%Y-%m-%d")
+    filtered = [a for a in corpus if (a.get("published_at") or "")[:10] >= cutoff]
+    if len(filtered) <= max_articles:
+        return filtered
+    step = len(filtered) / max_articles
+    return [filtered[int(i * step)] for i in range(max_articles)]
+
+
+def _cap_labels(labels: list[_ArticleLabel], max_labels: int) -> list[_ArticleLabel]:
+    if len(labels) <= max_labels:
+        return labels
+    step = len(labels) / max_labels
+    return [labels[int(i * step)] for i in range(max_labels)]
+
+
 def _score_keywords_from_labels(
     labels: list[_ArticleLabel],
     *,
@@ -236,6 +260,7 @@ def _score_keywords_from_labels(
     min_keyword_ic: float,
     max_keywords: int,
     today: str,
+    max_keywords_to_score: int = 3000,
 ) -> list[dict[str, Any]]:
     if len(labels) < min_support:
         return []
@@ -243,14 +268,22 @@ def _score_keywords_from_labels(
     all_returns = [a.forward_return for a in labels]
     baseline = sum(all_returns) / len(all_returns)
     keyword_stats: list[dict[str, Any]] = []
-    all_kws = {kw for a in labels for kw in a.keywords}
+    kw_to_present: dict[str, list[float]] = {}
+    for a in labels:
+        for kw in a.keywords:
+            kw_to_present.setdefault(kw, []).append(a.forward_return)
 
-    for kw in all_kws:
-        present = [a.forward_return for a in labels if kw in a.keywords]
-        absent = [a.forward_return for a in labels if kw not in a.keywords]
+    candidates = [
+        (kw, rets)
+        for kw, rets in kw_to_present.items()
+        if len(rets) >= min_support
+    ]
+    candidates.sort(key=lambda x: len(x[1]), reverse=True)
+    candidates = candidates[:max_keywords_to_score]
+
+    for kw, present in candidates:
         support = len(present)
-        if support < min_support:
-            continue
+        absent = [a.forward_return for a in labels if kw not in a.keywords]
         xs = [1.0 if kw in a.keywords else 0.0 for a in labels]
         ys = [a.forward_return for a in labels]
         ic = _pearson_ic(xs, ys)
@@ -278,6 +311,85 @@ def _score_keywords_from_labels(
     return keyword_stats[:max_keywords]
 
 
+def _discover_sector_job(
+    args: tuple[Any, ...],
+) -> tuple[str, str, list[dict[str, Any]]]:
+    (
+        sector_id,
+        etf,
+        corpus,
+        root,
+        horizon_days,
+        llm_cache,
+        use_llm,
+        min_support,
+        min_keyword_ic,
+        max_keywords_per_sector,
+        max_labels_per_sector,
+        today,
+    ) = args
+    return _discover_one_sector(
+        sector_id,
+        etf,
+        corpus,
+        root,
+        horizon_days,
+        llm_cache=llm_cache,
+        use_llm=use_llm,
+        min_support=min_support,
+        min_keyword_ic=min_keyword_ic,
+        max_keywords_per_sector=max_keywords_per_sector,
+        max_labels_per_sector=max_labels_per_sector,
+        today=today,
+    )
+
+
+def _discover_one_sector(
+    sector_id: str,
+    etf: str,
+    corpus: list[dict[str, Any]],
+    root: Path,
+    horizon_days: int,
+    *,
+    llm_cache: dict[str, dict[str, Any]] | None,
+    use_llm: bool,
+    min_support: int,
+    min_keyword_ic: float,
+    max_keywords_per_sector: int,
+    max_labels_per_sector: int,
+    today: str,
+) -> tuple[str, str, list[dict[str, Any]]]:
+    labels = _labels_from_corpus(
+        corpus,
+        sector_id,
+        root,
+        etf,
+        horizon_days,
+        include_macro=True,
+        llm_cache=llm_cache,
+        use_llm=use_llm,
+    )
+    labels = _cap_labels(labels, max_labels_per_sector)
+    keyword_stats = _score_keywords_from_labels(
+        labels,
+        min_support=min_support,
+        min_keyword_ic=min_keyword_ic,
+        max_keywords=max_keywords_per_sector,
+        today=today,
+    )
+    if len(keyword_stats) < 5 and min_keyword_ic >= 0.03:
+        keyword_stats = _score_keywords_from_labels(
+            labels,
+            min_support=max(2, min_support - 1),
+            min_keyword_ic=min_keyword_ic * 0.5,
+            max_keywords=max_keywords_per_sector,
+            today=today,
+        )
+        for row in keyword_stats:
+            row["low_confidence"] = True
+    return sector_id, etf, keyword_stats
+
+
 def discover_sector_keywords(
     run_dir: str | Path,
     *,
@@ -287,12 +399,19 @@ def discover_sector_keywords(
     min_support: int = 3,
     enrich_yahoo: bool = True,
     use_llm: bool = True,
+    max_labels_per_sector: int = 4000,
+    workers: int | None = None,
+    quiet: bool = False,
 ) -> tuple[list[Path], Path]:
     root = ensure_run_layout(run_dir)
     horizon_days = HORIZON_TRADING_DAYS.get(label_horizon, 21)
     ensure_sector_etf_ohlcv(root)
 
     corpus = load_corpus(root)
+    llm_cache = load_llm_keyword_cache(root) if use_llm else None
+    if use_llm and llm_cache:
+        corpus = [a for a in corpus if a.get("id") in llm_cache and llm_cache[a["id"]].get("keywords")]
+    corpus = _sample_corpus_for_discover(corpus)
     if enrich_yahoo and len(corpus) < 200:
         ingest_news(
             root,
@@ -304,7 +423,6 @@ def discover_sector_keywords(
 
     sector_etfs = load_sector_etfs(root)
     sector_etfs["anchor"] = "SPY"
-    llm_cache = load_llm_keyword_cache(root) if use_llm else None
     keyword_source = "cursor+ic" if (use_llm and llm_cache) else "tokens+ic"
 
     today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
@@ -316,42 +434,58 @@ def discover_sector_keywords(
         "",
     ]
     out_paths: list[Path] = []
+    sector_jobs = [
+        (sid, etf)
+        for sid, etf in sorted(sector_etfs.items())
+        if etf
+    ]
 
-    for sector_id in sorted(sector_etfs.keys()):
-        etf = sector_etfs.get(sector_id)
-        if not etf:
-            continue
-        labels = _labels_from_corpus(
-            corpus,
-            sector_id,
-            root,
+    discover_args = [
+        (
+            sid,
             etf,
+            corpus,
+            root,
             horizon_days,
-            include_macro=True,
-            llm_cache=llm_cache,
-            use_llm=use_llm,
+            llm_cache,
+            use_llm,
+            min_support,
+            min_keyword_ic,
+            max_keywords_per_sector,
+            max_labels_per_sector,
+            today,
         )
-        keyword_stats = _score_keywords_from_labels(
-            labels,
-            min_support=min_support,
-            min_keyword_ic=min_keyword_ic,
-            max_keywords=max_keywords_per_sector,
-            today=today,
+        for sid, etf in sector_jobs
+    ]
+    prog = RunProgress(
+        "keyword-discover",
+        len(discover_args),
+        run_dir=root,
+        pipeline="keywords.discover",
+        phase="sector_ic_fit",
+        quiet=quiet,
+        every=1,
+    )
+    if default_workers(workers) <= 1 or len(discover_args) <= 1:
+        prog.start()
+        results = []
+        for args in discover_args:
+            sid = args[0]
+            results.append(_discover_sector_job(args))
+            prog.advance(1, message=f"sector {sid}")
+        prog.finish()
+    else:
+        results = parallel_map_progress(
+            _discover_sector_job,
+            discover_args,
+            prog,
+            workers=workers,
+            use_threads=True,
         )
 
-        if len(keyword_stats) < 5 and min_keyword_ic >= 0.03:
-            keyword_stats = _score_keywords_from_labels(
-                labels,
-                min_support=max(2, min_support - 1),
-                min_keyword_ic=min_keyword_ic * 0.5,
-                max_keywords=max_keywords_per_sector,
-                today=today,
-            )
-            for row in keyword_stats:
-                row["low_confidence"] = True
-
-        models_dir = root / "models"
-        models_dir.mkdir(parents=True, exist_ok=True)
+    models_dir = root / "models"
+    models_dir.mkdir(parents=True, exist_ok=True)
+    for sector_id, etf, keyword_stats in results:
         out_path = models_dir / f"keyword_map_{sector_id}.json"
         out_path.write_text(json.dumps(keyword_stats, indent=2) + "\n")
         out_paths.append(out_path)

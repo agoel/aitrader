@@ -112,7 +112,10 @@ Portfolio allocator → buy/sell recommendations
 | Sector starters | `src/aitrader/config/sector_starters.yaml` | 11 GICS sectors × 10 names + SPY/IWM |
 | Schwab connector | `src/aitrader/data/schwab.py` | **Recipe — Charles Schwab API setup and connector** |
 | News ingest | `src/aitrader/nlp/news.py` | **Recipe — Macro news ingest and clustering** (ingest slice) |
+| Historical news (GDELT DOC) | `src/aitrader/nlp/gdelt.py` | **Recipe — Historical macro news ingest** (3mo API) |
+| Historical news (GKG bulk) | `src/aitrader/nlp/gdelt_gkg.py` | **Recipe — Historical macro news ingest** (5y backfill) |
 | News feeds config | `src/aitrader/config/news_feeds.yaml` | Fed, BLS, BEA, Treasury RSS |
+| Historical news config | `src/aitrader/config/historical_news_sources.yaml` | GDELT queries, BigQuery backfill notes |
 | Cursor keyword extract | `src/aitrader/nlp/cursor_extract.py` | **Recipe — Cursor keyword extraction** |
 | Keyword cache | `src/aitrader/nlp/keyword_cache.py` | Shared cache + phrase grounding |
 | Keyword discovery | `src/aitrader/nlp/keywords.py` | **Recipe — Sentiment keyword discovery** |
@@ -128,7 +131,7 @@ Portfolio allocator → buy/sell recommendations
 | **L1** | Data plane | Yahoo ingest, universe, OHLCV cache *(shipped)* |
 | **L2** | NLP features | News ingest, keyword discovery, clustering *(ingest + keywords shipped)* |
 | **L3** | Models + drift | Historical fit, drift monitor, refresh loop *(shipped)* |
-| **L4** | Prediction | Multi-horizon heads for SPY/RUT + sectors |
+| **L4** | Prediction | Multi-horizon heads for SPY/RUT + sectors *(shipped)* |
 | **L5** | Portfolio | Fixed-capital allocator, buy/sell report |
 | **L6** | Expansion | Full-universe scan, Schwab live quotes |
 
@@ -184,9 +187,9 @@ Portfolio allocator → buy/sell recommendations
 
 | Constant | Value |
 |----------|-------|
-| `_RSI_TYPE` | `test_suite` |
-| `_RSI_MAX_ROUNDS` | `3` |
-| `_RSI_STOP_CONDITION` | `pytest tests/ -q` exit 0 |
+| `_RSI_TYPE` | `external_metric` (L4 predict); `test_suite` (package) |
+| `_RSI_MAX_ROUNDS` | `5` (L4 predict) |
+| `_RSI_STOP_CONDITION` | News-backed backtest: IC ≥ 0.12, hit rate ≥ 65%, coverage ≥ 60%, N ≥ 3 |
 | `_RSI_ARTIFACT_DIR` | `runs/{run_slug}/rsi/` |
 
 ### Expert pushback
@@ -362,18 +365,43 @@ Portfolio allocator → buy/sell recommendations
 ### Run
 
 1. `python -m aitrader keywords prepare-cursor --run-dir {run_dir}` — writes `data/news/cursor_batches/batch_NNN.md` + `_in.json`.
-2. **Cursor agent:** read each batch `.md`; write `batch_NNN_out.json` (JSON shape in brief footer). Or `keywords fill-cursor` applies the same macro policy in-repo for bootstrap.
-3. `python -m aitrader keywords apply-cursor --run-dir {run_dir} --batch N` — or `apply-all-cursor` for every `*_out.json`.
-4. `python -m aitrader keywords finalize-cursor --run-dir {run_dir}` when done.
-5. `python -m aitrader keywords discover --run-dir {run_dir}` — IC validation (uses cache; `--no-llm` for token fallback).
+2. **Parallel extract (fast path):** `keywords fill-cursor --pending-only --workers 8` — uncached articles only; or `keywords run-cursor --workers 8` (fill + apply + discover).
+3. **Cursor agent (optional):** read each batch `.md`; write `batch_NNN_out.json`. Policy fill runs in parallel when `--fill` (default on `run-cursor`).
+4. `python -m aitrader keywords apply-all-cursor --run-dir {run_dir} --workers 8` — merge batch JSON into `llm_keywords.jsonl`.
+5. `python -m aitrader keywords finalize-cursor --run-dir {run_dir}` when done.
+6. `python -m aitrader keywords discover --run-dir {run_dir} --workers 8` — IC fit per sector (parallel).
 
-**One-shot:** `bash .cursor/scripts/run_cursor_keywords.sh {run_dir}` — runs `keywords run-cursor` (prepare + fill + apply-all + finalize + discover).
+**One-shot:** `bash .cursor/scripts/run_cursor_keywords.sh {run_dir}` — runs `keywords run-cursor --workers 8`.
 
 **CoT backtrack:** append agent notes to `{run_dir}/cot/cursor_keywords.cot.md` per batch checkpoint.
 
 **Optional comparison track:** `keywords extract-openai` (requires `OPENAI_API_KEY`) — not primary.
 
-**Verify:** `llm_keywords.jsonl` row count increases per `apply-cursor`; `meta.json` → `cursor_keywords.batches_done`; discover report shows `cursor+ic`.
+### Human progress feedback (mandatory on long runs)
+
+Long steps print **`[phase] done/total (pct%) — N left`** to stdout and update **`{run_dir}/reports/pipeline_status.json`**:
+
+| Pipeline | Phases (step/total) | Item progress |
+|----------|---------------------|---------------|
+| `keywords.run-cursor` | prepare → fill_pending → fill_batches → apply → finalize → discover (5–6) | articles / batches / sectors |
+| `keywords.discover` | sector_ic_fit | 12 sectors |
+| `predict.backtest` | build_month_features → walkforward_spy | month-ends |
+| `news.ingest-historical` | GKG bulk downloads | sampled GKG files |
+
+**Monitor while running:**
+
+```bash
+# Live status file (safe to tail in another terminal)
+cat ~/data/aitrader/runs/{run_slug}/reports/pipeline_status.json
+
+# Example stdout
+# == keywords.run-cursor step 2/5: fill_pending ==
+# [fill-pending-keywords] 4000/21317 (19%) — 17317 left — chunk 8/43
+```
+
+Use `--quiet` / `-q` to suppress stdout; status file still updates.
+
+**Verify:** `llm_keywords.jsonl` row count increases per `apply-cursor`; `meta.json` → `cursor_keywords.batches_done`; discover report shows `cursor+ic`; `pipeline_status.json` ends with `"status": "done"`.
 
 ---
 
@@ -393,7 +421,7 @@ Portfolio allocator → buy/sell recommendations
 ### Run
 
 1. Prefer **Recipe — Cursor keyword extraction** cache in `llm_keywords.jsonl`; fallback to token extract if missing.
-2. Build labeled dataset: forward return per ticker/sector ETF at `{label_horizon}`.
+2. Build labeled dataset: forward return per ticker/sector ETF at `{label_horizon}` (sectors run in **parallel** with `--workers`).
 3. Score keyword presence; keep phrases with \|IC\| ≥ `{min_keyword_ic}`.
 4. Write `models/keyword_map_{sector_id}.json`:
    ```json
@@ -457,11 +485,12 @@ Portfolio allocator → buy/sell recommendations
 
 ### Run
 
-1. Ingest from `{news_sources}`: RSS (Fed, BLS, Reuters macro), Yahoo Finance headlines, optional user CSV.
-2. Normalize to schema: `{id, published_at, title, body, source, tags}` → `data/news/{date}.jsonl`.
-3. Embed documents; fit or apply k-means / HDBSCAN with `{cluster_k}`.
-4. Map each cluster to historical return profile per sector (from labeled history).
-5. Save `models/news_clusters.pkl` and `reports/news_cluster_{date}.md` (top terms per cluster).
+1. Ingest from `{news_sources}`: RSS (Fed, BLS, Reuters macro), Yahoo Finance headlines (recent only), optional user CSV.
+2. **Before backtest:** invoke **Recipe — Historical macro news ingest** (GDELT + deep RSS) so `corpus.jsonl` has dated macro coverage — Yahoo alone is not sufficient for walk-forward.
+3. Normalize to schema: `{id, published_at, title, body, source, tags}` → `data/news/{date}.jsonl`.
+4. Embed documents; fit or apply k-means / HDBSCAN with `{cluster_k}`.
+5. Map each cluster to historical return profile per sector (from labeled history).
+6. Save `models/news_clusters.pkl` and `reports/news_cluster_{date}.md` (top terms per cluster).
 
 **Verify:** Today's jsonl has ≥ 10 articles or documented low-news day; cluster assign for current window written to `models/current_cluster.json`.
 
@@ -471,6 +500,58 @@ Portfolio allocator → buy/sell recommendations
 |---------|---------|
 | RSS fetch fail | Retry 3×; fall back to cached prior day |
 | Single mega-cluster | Increase `{cluster_k}` by 2 once |
+| Backtest months with `news_articles=0` | Run historical ingest; do **not** substitute price momentum for missing news |
+
+---
+
+## Recipe — Historical macro news ingest
+
+**Purpose:** Build a **dated** macro news corpus for backtest and walk-forward — independent of Yahoo's recent-headline bias.
+
+### Formal parameters
+
+| Parameter | Type | Required / Optional / Default | Description |
+|-----------|------|-------------------------------|-------------|
+| `{timespan}` | string | **Default:** `90days` | GDELT DOC rolling window (max ~3 months) |
+| `{rss_window_days}` | int | **Default:** `365` | Deep RSS pull from Fed/BLS/BEA/Treasury |
+| `{gdelt_queries}` | list | **Default:** from `historical_news_sources.yaml` | fed, inflation, employment, earnings, tariff |
+| `{lookback_years}` | number | **Default:** `5` | If > 0.25y, enable GDELT BigQuery GKG export (future) |
+
+### Where historical news lives
+
+| Source | Depth | Module / config |
+|--------|-------|-----------------|
+| **GDELT GKG 2.0 bulk** | **Primary** — Feb 2015+, sample 1 file / 7 days (5y default) | `nlp/gdelt_gkg.py`, `historical_news_sources.yaml` § `gdelt_gkg` |
+| **Google News macro RSS** | ~1 year per query; Reuters/Bloomberg/Fed via search | `historical_news_sources.yaml` § `google_news_rss` |
+| **GDELT DOC 2.0 API** | Rolling ~3 months (supplement) | `nlp/gdelt.py` |
+| **Fed/BLS/BEA/Treasury/SEC/ECB RSS** | Official releases, precise `pubDate` | `news_feeds.yaml`, `--rss-window-days` |
+| **GDELT BigQuery** | Dense SQL export (opt-in) | `historical_news_sources.yaml` § `gdelt_bigquery` |
+| Yahoo Finance | Recent headlines only | Not used for historical backtest depth |
+
+### Run
+
+```bash
+python -m aitrader news ingest-historical --run-dir ~/data/aitrader/runs/{run_slug} \
+  --rss-window-days 365 --gkg-lookback-days 1825 --gkg-sample-days 7
+```
+
+1. **GKG bulk** — download sampled `.gkg.csv.zip` files from GDELT masterfilelist; filter `ECON_*` / `EPU_*` themes; prefer Reuters/Bloomberg/CNBC/Fed domains.
+2. **Google News RSS** — macro queries with `when:1y` (fed, CPI, earnings, tariffs, Reuters).
+3. **GDELT DOC** `ArtList` per macro query (rate limit 6s).
+4. **RSS** with `{rss_window_days}`; append to `data/news/corpus.jsonl` (dedupe by `id`).
+5. Re-run Cursor keywords + discovery on expanded corpus before `predict backtest`.
+
+**Verify:** `corpus.jsonl` has articles spanning **years** (not a single-day spike); `distinct_dates` ≫ 15; backtest monthly rows show `news_articles > 0` on multiple months.
+
+#### Self-healing
+
+| Symptom | Recover |
+|---------|---------|
+| GDELT DOC rate limit | Wait 6s between queries; reduce `maxrecords` |
+| GKG ingest slow | Raise `{sample_days}` to 14; lower `{max_per_file}` |
+| Need denser daily coverage | Enable `gdelt_bigquery` or lower `{sample_days}` to 1 |
+
+**Future indicator (not news):** Price **momentum** will be added as a **separate L4+ indicator** layer. When `news_articles < min_news_confident`, predictor emits `no_news_signal=true` and neutral forecast — momentum does **not** replace missing news.
 
 ---
 
@@ -488,13 +569,22 @@ Portfolio allocator → buy/sell recommendations
 
 ### Run
 
-1. Features: keyword scores from current news, cluster id one-hot, recent momentum, sector ETF beta to SPY.
-2. Train or load per-horizon models (separate heads for `2w`, `1m`, `3m`).
-3. Score full universe + anchors; output `reports/predictions_{date}.csv`:
+1. Features: keyword scores from current news, cluster id one-hot, recent momentum (training feature only), sector ETF beta to SPY.
+2. **No-news policy:** if `news_articles < min_news_confident`, expected return = 0, wide bands, `no_news_signal=true` — do not fall back to momentum-only forecast (momentum indicator is a future separate slice).
+3. Train or load per-horizon models (separate heads for `2w`, `1m`, `3m`).
+4. Score full universe + anchors; output `reports/predictions_{date}.csv`:
    `ticker,sector_id,horizon,expected_return,confidence_lower,confidence_upper,cluster_id,top_keywords`.
-4. Add index summary rows for `SPY` and `IWM` at top of CSV.
+5. Add index summary rows for `SPY` and `IWM` at top of CSV.
 
 **Verify:** All `{horizons}` present for anchors; confidence bounds ordered lower < expected < upper; no duplicate ticker×horizon rows.
+
+**Backtest (mandatory before L5):** `python -m aitrader predict backtest --run-dir {run_dir}` — walk-forward IC/hit-rate vs realized returns; slices by **cluster_id** and **macro event** (fed, inflation, earnings, tariff). Artifacts: `reports/backtest_predictions_{date}.csv`, `backtest_summary_{date}.csv`, `backtest_report_{date}.md`. `l4` runs predict + backtest by default.
+
+**Performance gate (mandatory):** **lsai_subagents.md** § **Recipe — Slice-first performance gate (data pipelines)**. Domain budgets: probe **3 months** + **10 macro days** under **60s** before full backtest; hot paths must reuse `news_clusters.pkl` sector profiles (no per-month `_sector_return_profiles`), macro event study **one row per trading day** (not per article), signal capped to **100** articles/window in backtest only.
+
+**RSI performance:** `build_backtest_feature_cache` runs expensive feature build **once**; each RSI candidate only re-scores walk-forward + macro predictions (~seconds). Do **not** call full `_monthly_spy_backtest` + `_macro_event_study` per round.
+
+**RSI (mandatory before L5):** `python -m aitrader predict rsi --run-dir {run_dir}` — up to 5 tuning rounds; saves `models/predict_config.json` and `rsi/predict_rsi.md`. Stop when news-backed IC ≥ 0.12, hit rate ≥ 65%, confidence coverage ≥ 60% (N ≥ 3 news months). `l4` runs RSI after backtest unless `--skip-rsi`.
 
 #### Self-healing
 
@@ -555,7 +645,7 @@ Portfolio allocator → buy/sell recommendations
 | L2 | 2 | Cursor keyword extraction + IC discovery | completed |
 | L3 | 1 | Concept drift detection + refresh loop | completed |
 | L3 | 2 | News clustering vs historical regimes | completed |
-| L4 | 1 | Multi-horizon prediction (SPY, IWM, sectors) | pending |
+| L4 | 1 | Multi-horizon prediction (SPY, IWM, sectors) | completed |
 | L5 | 1 | Portfolio allocation (fixed capital) | pending |
 | L6 | 1 | Schwab connector + full-universe mode | pending |
 
@@ -569,10 +659,13 @@ Portfolio allocator → buy/sell recommendations
 - **L2 verified:** 1115 articles ingested; Cursor batches under `data/news/cursor_batches/`; `llm_keywords.jsonl` + refreshed `keyword_map_*.json` after `run-cursor`.
 - **L3 shipped:** `ml/drift.py` (IC drift + 2-run refresh guard), `nlp/cluster.py` (TF-IDF + KMeans regimes).
 - **L3 verified:** `drift_{date}.md`, `news_clusters.pkl`, `current_cluster.json`; tests 18 passed.
+- **L4 shipped:** `ml/predict.py` (Ridge per horizon, keyword + cluster + momentum + beta features); CLI `predict run` / `l4`.
+- **L4 verified:** `predictions_{date}.csv` with SPY/IWM anchors at top; `predictor_{horizon}.pkl` under `models/`.
+- **L4 backtest:** `ml/backtest.py` — walk-forward keyword/cluster/sentiment vs realized; monthly SPY replay when news dates sparse.
 
 #### TODO
 
-- None (L3 complete).
+- None (L4 complete; L5 portfolio next).
 
 #### TODO Next release
 

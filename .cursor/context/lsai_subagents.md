@@ -176,6 +176,39 @@ Per run: **`runs/{run_slug}/interaction_log.md`**. Full recipe: **lsai_superagen
 
 Each recipe: **`#### Self-healing`** with symptom → assess → recover bullets for **this** recipe’s artifacts and RSI type.
 
+## Recipe — Slice-first performance gate (data pipelines)
+
+**Purpose:** Before any full-corpus or multi-month batch job, profile on a **small slice**, fix hot paths, then scale. Applies to ingest, keyword fill, backtest, RSI, and any loop over 10k+ rows.
+
+**Child recipes:** Domain parents (e.g. **aitrader_subagent.md** § prediction backtest) cite this recipe and add **domain budgets** only—do not duplicate the gate steps.
+
+### Formal parameters
+
+| Parameter | Type | Required / Optional / Default | Description |
+|-----------|------|-------------------------------|-------------|
+| `{slice_size}` | int | **Default:** problem-specific (see parent) | Rows, months, or articles in probe |
+| `{slice_budget_sec}` | number | **Default:** `60` | Max wall time for probe before abort + diagnose |
+| `{full_budget_sec}` | number | **Optional** | Abort full run if exceeded after probe passed |
+
+### Run
+
+1. **Count** — print corpus size, loop cardinality (e.g. articles × inner work), and expected iterations **before** starting the full job.
+2. **Probe** — run the same code path on `{slice_size}` (e.g. 3 months, 10 articles, 1 sector); log **per-step** timings (not only phase totals).
+3. **Extrapolate** — if probe × scale > `{slice_budget_sec}` or obvious O(n²), **stop**; do not launch the full batch.
+4. **Fix** — remove redundant work (reuse cached models, aggregate by day not row, bisect timelines, cap window reads, parallelize only after slice is green).
+5. **Re-probe** — repeat until probe completes under budget with correct outputs.
+6. **Full run** — only then run the full dataset; keep **RunProgress** / `pipeline_status.json` on every long phase.
+
+**Verify:** Probe log shows dominant step and post-fix probe is ≥10× faster or under `{slice_budget_sec}`; full run finishes without silent multi-hour stalls.
+
+#### Self-healing
+
+| Symptom | Recover |
+|---------|---------|
+| Progress stuck at same fraction >2× probe extrapolation | Kill run; return to step 2 with smaller slice; print per-iteration timing |
+| “Walk-forward slow” but loop count is small | Profile **downstream** phases (often a second loop over all rows, not the walk-forward itself) |
+| Full run still slow after probe | Probe was unrepresentative—increase slice until hot path matches production cardinality |
+
 ### Content style (crisp and actionable)
 
 - **Bold for labels** — Use bold for category labels, step titles, and key terms. Example: **Run:**, **Verify:**, **Purpose:**.

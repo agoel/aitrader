@@ -68,6 +68,7 @@ l345_router.md: stack bootstrap, stack bootstrap portable, superagent install
 | Sentiment keyword discovery | recipe | `aitrader_subagent.md` | `## Recipe — Sentiment keyword discovery` | IC fit on Cursor phrases |
 | Concept drift detection | recipe | `aitrader_subagent.md` | `## Recipe — Concept drift detection` | Detect hypothesis decay; trigger refresh |
 | Macro news ingest and clustering | recipe | `aitrader_subagent.md` | `## Recipe — Macro news ingest and clustering` | Ingest and cluster current news |
+| Historical macro news ingest | recipe | `aitrader_subagent.md` | `## Recipe — Historical macro news ingest` | GDELT + deep RSS for dated backtest corpus |
 | Multi-horizon price prediction | recipe | `aitrader_subagent.md` | `## Recipe — Multi-horizon price prediction` | 2w / 1m / 3m forecasts |
 | Portfolio allocation (fixed capital) | recipe | `aitrader_subagent.md` | `## Recipe — Portfolio allocation (fixed capital)` | Buy/sell under fixed budget |
 
