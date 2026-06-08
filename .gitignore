@@ -1,0 +1,59 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg-info/
+.eggs/
+dist/
+build/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+.tox/
+.nox/
+pip-log.txt
+pip-delete-this-directory.txt
+
+# Virtual environments
+.venv/
+venv/
+env/
+ENV/
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+._*
+
+# Linux
+*~
+
+# Editor / IDE
+.idea/
+*.swp
+*.swo
+*.swn
+.vscode/
+*.code-workspace
+
+# Logs and local scratch
+*.log
+*.tmp
+*.temp
+.cache/
+
+# Secrets (never commit)
+.env
+.env.*
+!.env.example
+*.pem
+credentials.json
+
+# Router pipeline outputs (local under ~/data by default; ignore if copied into repo)
+agent_topics/
+agent_topics_l345/

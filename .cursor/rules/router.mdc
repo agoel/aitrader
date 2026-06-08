@@ -1,0 +1,12 @@
+---
+description: Context discovery from domain and L345 routers every turn
+alwaysApply: true
+---
+
+Before planning, coding, testing, or MR work:
+
+1. Run **Context Discovery** from `.cursor/context/l345_router.md` (standards, MR, recipe templates, agent authoring).
+2. Run **Context Discovery** from `.cursor/context/router.md` (domain / product L2 — add domain `*.md` under `.cursor/context/` and wire topics in the router as the repo grows).
+3. Load only the agent sections identified by those routers, then proceed.
+4. At response end, prepend the project interaction log per `lsai_superagent.md` § **Recipe — Project interaction log (every turn)** at `~/data/{project_slug}/runs/{run_slug}/interaction_log.md` — read entire file first; **Prepend algorithm**; never truncate.
+5. **New project:** **`bash .cursor/scripts/copy_template.sh <dest> --bootstrap`** (excludes `.git`). **Existing checkout:** **`bash .cursor/scripts/bootstrap_portable.sh`** — one shot; do not duplicate in chat.

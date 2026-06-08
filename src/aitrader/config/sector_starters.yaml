@@ -1,0 +1,174 @@
+# Bundled starter universe — liquid large/mid caps per GICS Level-1 sector.
+# Used by universe.build; outputs land in the active run directory.
+
+anchors:
+  - ticker: SPY
+    name: SPDR S&P 500 ETF Trust
+  - ticker: IWM
+    name: iShares Russell 2000 ETF
+
+sectors:
+  - id: technology
+    name: Technology
+    etf_proxy: XLK
+    stocks:
+      - {ticker: AAPL, name: Apple Inc.}
+      - {ticker: MSFT, name: Microsoft Corp.}
+      - {ticker: NVDA, name: NVIDIA Corp.}
+      - {ticker: GOOGL, name: Alphabet Inc.}
+      - {ticker: META, name: Meta Platforms Inc.}
+      - {ticker: AVGO, name: Broadcom Inc.}
+      - {ticker: ORCL, name: Oracle Corp.}
+      - {ticker: CRM, name: Salesforce Inc.}
+      - {ticker: AMD, name: Advanced Micro Devices}
+      - {ticker: INTC, name: Intel Corp.}
+
+  - id: financials
+    name: Financials
+    etf_proxy: XLF
+    stocks:
+      - {ticker: JPM, name: JPMorgan Chase & Co.}
+      - {ticker: BAC, name: Bank of America Corp.}
+      - {ticker: WFC, name: Wells Fargo & Co.}
+      - {ticker: GS, name: Goldman Sachs Group}
+      - {ticker: MS, name: Morgan Stanley}
+      - {ticker: C, name: Citigroup Inc.}
+      - {ticker: BLK, name: BlackRock Inc.}
+      - {ticker: SCHW, name: Charles Schwab Corp.}
+      - {ticker: AXP, name: American Express Co.}
+      - {ticker: USB, name: U.S. Bancorp}
+
+  - id: energy
+    name: Energy
+    etf_proxy: XLE
+    stocks:
+      - {ticker: XOM, name: Exxon Mobil Corp.}
+      - {ticker: CVX, name: Chevron Corp.}
+      - {ticker: COP, name: ConocoPhillips}
+      - {ticker: SLB, name: Schlumberger NV}
+      - {ticker: EOG, name: EOG Resources Inc.}
+      - {ticker: MPC, name: Marathon Petroleum}
+      - {ticker: PSX, name: Phillips 66}
+      - {ticker: VLO, name: Valero Energy}
+      - {ticker: OXY, name: Occidental Petroleum}
+      - {ticker: WMB, name: Williams Companies}
+
+  - id: health_care
+    name: Health Care
+    etf_proxy: XLV
+    stocks:
+      - {ticker: UNH, name: UnitedHealth Group}
+      - {ticker: JNJ, name: Johnson & Johnson}
+      - {ticker: LLY, name: Eli Lilly & Co.}
+      - {ticker: PFE, name: Pfizer Inc.}
+      - {ticker: ABBV, name: AbbVie Inc.}
+      - {ticker: MRK, name: Merck & Co.}
+      - {ticker: TMO, name: Thermo Fisher Scientific}
+      - {ticker: AMGN, name: Amgen Inc.}
+      - {ticker: GILD, name: Gilead Sciences}
+      - {ticker: ISRG, name: Intuitive Surgical}
+
+  - id: consumer_discretionary
+    name: Consumer Discretionary
+    etf_proxy: XLY
+    stocks:
+      - {ticker: AMZN, name: Amazon.com Inc.}
+      - {ticker: TSLA, name: Tesla Inc.}
+      - {ticker: HD, name: Home Depot Inc.}
+      - {ticker: MCD, name: McDonald's Corp.}
+      - {ticker: NKE, name: Nike Inc.}
+      - {ticker: LOW, name: Lowe's Companies}
+      - {ticker: SBUX, name: Starbucks Corp.}
+      - {ticker: TJX, name: TJX Companies}
+      - {ticker: BKNG, name: Booking Holdings}
+      - {ticker: CMG, name: Chipotle Mexican Grill}
+
+  - id: industrials
+    name: Industrials
+    etf_proxy: XLI
+    stocks:
+      - {ticker: GE, name: GE Aerospace}
+      - {ticker: CAT, name: Caterpillar Inc.}
+      - {ticker: RTX, name: RTX Corp.}
+      - {ticker: HON, name: Honeywell International}
+      - {ticker: UNP, name: Union Pacific Corp.}
+      - {ticker: BA, name: Boeing Co.}
+      - {ticker: DE, name: Deere & Co.}
+      - {ticker: LMT, name: Lockheed Martin}
+      - {ticker: ETN, name: Eaton Corp.}
+      - {ticker: ADP, name: Automatic Data Processing}
+
+  - id: materials
+    name: Materials
+    etf_proxy: XLB
+    stocks:
+      - {ticker: LIN, name: Linde plc}
+      - {ticker: APD, name: Air Products & Chemicals}
+      - {ticker: SHW, name: Sherwin-Williams}
+      - {ticker: ECL, name: Ecolab Inc.}
+      - {ticker: FCX, name: Freeport-McMoRan}
+      - {ticker: NEM, name: Newmont Corp.}
+      - {ticker: DOW, name: Dow Inc.}
+      - {ticker: NUE, name: Nucor Corp.}
+      - {ticker: VMC, name: Vulcan Materials}
+      - {ticker: MLM, name: Martin Marietta Materials}
+
+  - id: consumer_staples
+    name: Consumer Staples
+    etf_proxy: XLP
+    stocks:
+      - {ticker: PG, name: Procter & Gamble}
+      - {ticker: KO, name: Coca-Cola Co.}
+      - {ticker: PEP, name: PepsiCo Inc.}
+      - {ticker: COST, name: Costco Wholesale}
+      - {ticker: WMT, name: Walmart Inc.}
+      - {ticker: PM, name: Philip Morris International}
+      - {ticker: MO, name: Altria Group}
+      - {ticker: CL, name: Colgate-Palmolive}
+      - {ticker: MDLZ, name: Mondelez International}
+      - {ticker: KHC, name: Kraft Heinz Co.}
+
+  - id: utilities
+    name: Utilities
+    etf_proxy: XLU
+    stocks:
+      - {ticker: NEE, name: NextEra Energy}
+      - {ticker: SO, name: Southern Co.}
+      - {ticker: DUK, name: Duke Energy}
+      - {ticker: AEP, name: American Electric Power}
+      - {ticker: SRE, name: Sempra}
+      - {ticker: EXC, name: Exelon Corp.}
+      - {ticker: D, name: Dominion Energy}
+      - {ticker: PCG, name: PG&E Corp.}
+      - {ticker: ETR, name: Entergy Corp.}
+      - {ticker: WEC, name: WEC Energy Group}
+
+  - id: real_estate
+    name: Real Estate
+    etf_proxy: XLRE
+    stocks:
+      - {ticker: PLD, name: Prologis Inc.}
+      - {ticker: AMT, name: American Tower}
+      - {ticker: EQIX, name: Equinix Inc.}
+      - {ticker: CCI, name: Crown Castle}
+      - {ticker: PSA, name: Public Storage}
+      - {ticker: SPG, name: Simon Property Group}
+      - {ticker: O, name: Realty Income Corp.}
+      - {ticker: WELL, name: Welltower Inc.}
+      - {ticker: DLR, name: Digital Realty Trust}
+      - {ticker: AVB, name: AvalonBay Communities}
+
+  - id: communication_services
+    name: Communication Services
+    etf_proxy: XLC
+    stocks:
+      - {ticker: DIS, name: Walt Disney Co.}
+      - {ticker: NFLX, name: Netflix Inc.}
+      - {ticker: CMCSA, name: Comcast Corp.}
+      - {ticker: VZ, name: Verizon Communications}
+      - {ticker: T, name: AT&T Inc.}
+      - {ticker: TMUS, name: T-Mobile US}
+      - {ticker: CHTR, name: Charter Communications}
+      - {ticker: EA, name: Electronic Arts}
+      - {ticker: TTWO, name: Take-Two Interactive}
+      - {ticker: WBD, name: Warner Bros. Discovery}
