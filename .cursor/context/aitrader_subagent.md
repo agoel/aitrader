@@ -183,14 +183,25 @@ Portfolio allocator → buy/sell recommendations
 
 `~/data/{project_slug}/runs/{run_slug}/` — bind all params in `meta.json` before Step 1.
 
-### RSI
+### RSI (agent brain)
 
 | Constant | Value |
 |----------|-------|
-| `_RSI_TYPE` | `external_metric` (L4 predict); `test_suite` (package) |
-| `_RSI_MAX_ROUNDS` | `5` (L4 predict) |
-| `_RSI_STOP_CONDITION` | News-backed backtest: IC ≥ 0.12, hit rate ≥ 65%, coverage ≥ 60%, N ≥ 3 |
-| `_RSI_ARTIFACT_DIR` | `runs/{run_slug}/rsi/` |
+| `_RSI_TYPE` | `test_suite` (package); `recipe_authoring` (procedure gaps); child **Recipe — Slice-first performance gate** |
+| `_RSI_ARTIFACT_DIR` | `runs/{run_slug}/agent_rsi/` |
+
+Examples: parallel keyword fill, progress UX, GDELT/Schwab connectors, backtest perf (feature cache, per-day macro events). **Not** tuning `predict_config` for returns.
+
+### Self-learning (L4 prediction tune)
+
+| Constant | Value |
+|----------|-------|
+| `_LEARN_TYPE` | `external_metric` |
+| `_LEARN_MAX_ROUNDS` | `5` (`0` = full grid) |
+| `_LEARN_STOP_CONDITION` | News-backed: IC ≥ 0.12, hit rate ≥ 65%, coverage ≥ 60%, N ≥ 3; portfolio excess vs B&H ≥ 0 (when sim run) |
+| `_LEARN_ARTIFACT_DIR` | `runs/{run_slug}/learning/` |
+
+Cite **lsai_subagents.md** § **Recipe — Self-learning (domain objective)**. CLI today: `predict rsi` → **rename** to `predict tune` (Phase 2).
 
 ### Expert pushback
 
@@ -201,7 +212,7 @@ Portfolio allocator → buy/sell recommendations
 
 ### Run
 
-1. Resolve `{run_slug}`; `mkdir -p ~/data/{project_slug}/runs/{run_slug}/{config,data,models,reports,rsi}`; update `meta.json` with bound params.
+1. Resolve `{run_slug}`; `mkdir -p ~/data/{project_slug}/runs/{run_slug}/{config,data,models,reports,agent_rsi,learning}`; update `meta.json` with bound params.
 2. Invoke **Recipe — Sector universe definition**.
 3. Invoke data child: **Yahoo** (default) or **Schwab** on failure/user choice.
 4. Invoke **Recipe — Cursor keyword extraction** (prepare → agent batch JSON → apply → finalize).
@@ -582,9 +593,9 @@ python -m aitrader news ingest-historical --run-dir ~/data/aitrader/runs/{run_sl
 
 **Performance gate (mandatory):** **lsai_subagents.md** § **Recipe — Slice-first performance gate (data pipelines)**. Domain budgets: probe **3 months** + **10 macro days** under **60s** before full backtest; hot paths must reuse `news_clusters.pkl` sector profiles (no per-month `_sector_return_profiles`), macro event study **one row per trading day** (not per article), signal capped to **100** articles/window in backtest only.
 
-**RSI performance:** `build_backtest_feature_cache` runs expensive feature build **once**; each RSI candidate only re-scores walk-forward + macro predictions (~seconds). Do **not** call full `_monthly_spy_backtest` + `_macro_event_study` per round.
+**Agent RSI (perf):** `build_backtest_feature_cache` runs expensive feature build **once**; each self-learning candidate only re-scores (~seconds). Cite **Recipe — Slice-first performance gate** before full eval.
 
-**RSI (mandatory before L5):** `python -m aitrader predict rsi --run-dir {run_dir}` — up to 5 tuning rounds; saves `models/predict_config.json` and `rsi/predict_rsi.md`. Stop when news-backed IC ≥ 0.12, hit rate ≥ 65%, confidence coverage ≥ 60% (N ≥ 3 news months). `l4` runs RSI after backtest unless `--skip-rsi`.
+**Self-learning (mandatory before L5):** `python -m aitrader predict tune --run-dir {run_dir}` *(alias: `predict rsi` until Phase 2 rename)* — grid over `PredictTuneConfig`; saves `models/predict_config.json` and `learning/predict_tune.md`. Stop per `_LEARN_STOP_CONDITION` in parent **Self-learning** block. `l4` runs tune after backtest unless `--skip-tune` *(alias: `--skip-rsi`)*.
 
 #### Self-healing
 

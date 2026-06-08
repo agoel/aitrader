@@ -42,6 +42,7 @@ overview (4)
 recipe structure (5)
 recipe formal parameters (5)
 recipe RSI (5)
+recipe self learning (5)
 recipe self healing (4)
 expert pushback (5)
 layered MR slug pack (5)
@@ -108,6 +109,8 @@ git_mr_guidelines.md: Sections
 | Beta / staging remote ops | pattern | `lsai_e2e.md` | `## Beta / staging — remote operations recipe (pattern)` | Deploy, babysit, remote logs on staging |
 | Recipe structure & composition | meta | `lsai_subagents.md` | `Recipe of Recipes` → **DRY**, **Parent and child recipes**, **Formal parameters** | Authoring, splitting, citing recipes |
 | Slice-first performance gate (data pipelines) | recipe | `lsai_subagents.md` | `## Recipe — Slice-first performance gate (data pipelines)` | Profile small slice, fix hot path, then full batch |
+| Self-learning (domain objective) | recipe | `lsai_subagents.md` | `## Recipe — Self-learning (domain objective)` | Tune domain params until KPI gates pass |
+| Three improvement loops (RSI vs learning) | meta | `lsai_subagents.md` | `Recipe of Recipes` → **Three improvement loops (do not conflate)** | Authoring; push back on conflated “RSI returns” |
 | Router Builder | meta | `lsai_superagent.md` | `Router Architecture and Builder` → **Router Builder Recipe** | L4 topic index generation |
 
 **Run:** Match user goal → row above → load owner section only. **Verify:** No new inline procedure duplicates an indexed **Run** block without a child-recipe cite.
@@ -239,7 +242,13 @@ git_mr_guidelines.md: Sections
 
 ### recipe RSI
 
-- lsai_subagents.md | section: Recipe of Recipes | sub-section: ### RSI — recursive self-improvement (one type per recipe)
+- lsai_subagents.md | section: Recipe of Recipes | sub-section: ### Three improvement loops (do not conflate)
+- lsai_subagents.md | section: Recipe of Recipes | sub-section: ### RSI — recursive self-improvement (agent brain)
+
+### recipe self learning
+
+- lsai_subagents.md | section: Recipe of Recipes | sub-section: ### Self-learning (domain objective)
+- lsai_subagents.md | section: Recipe of Recipes | sub-section: ## Recipe — Self-learning (domain objective)
 
 ### recipe self healing
 

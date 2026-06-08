@@ -36,7 +36,7 @@ The **high-level** SuperAgent / OmMeGo story for papers, external communication,
 
 # Recipe of Recipes
 
-This section has three parts: **(1)** how a recipe should be structured and written so an agent can follow it—including **formal parameters**, **RSI** (recursive self-improvement / self-learning), and **self-healing**; **(2)** how to extract a set of recipes from existing agent docs and consolidate them into a canonical recipe document; **(3)** how to publish recipes (e.g. to S3).
+This section has three parts: **(1)** how a recipe should be structured and written so an agent can follow it—including **formal parameters**, **RSI** (agent brain), **self-learning** (domain objective), and **self-healing**; **(2)** how to extract a set of recipes from existing agent docs and consolidate them into a canonical recipe document; **(3)** how to publish recipes (e.g. to S3).
 
 ---
 
@@ -46,7 +46,9 @@ This section has three parts: **(1)** how a recipe should be structured and writ
 
 ### Structure
 
-After **Recipe purpose**, every recipe includes (in order): **Formal parameters** · **Child recipes** *(parents only)* · **Run workspace** *(multi-stage)* · **RSI** · **Self-healing** · **Expert pushback** · numbered **Run** steps with **Verify**.
+After **Recipe purpose**, every recipe includes (in order): **Formal parameters** · **Child recipes** *(parents only)* · **Run workspace** *(multi-stage)* · **RSI** *(agent brain — optional)* · **Self-learning** *(domain objective — optional)* · **Self-healing** · **Expert pushback** · numbered **Run** steps with **Verify**.
+
+**Do not conflate RSI and self-learning.** See **### Three improvement loops (do not conflate)** below.
 
 ### DRY, deduplication, and modularization (mandatory)
 
@@ -94,7 +96,15 @@ After **Recipe purpose**, every recipe includes (in order): **Formal parameters*
 
 ### Run workspace (`~/data/{project_slug}/runs/{run_slug}/`)
 
-One **run** = one folder: `meta.json`, `interaction_log.md`, stage **CoT** + artifacts, optional MR layer tree (`specification/`, `design/`, `execution/`, `merges/`, `rsi/`).
+One **run** = one folder: `meta.json`, `interaction_log.md`, stage **CoT** + artifacts, optional MR layer tree (`specification/`, `design/`, `execution/`, `merges/`, `agent_rsi/`, `learning/`).
+
+| Subdir | Loop | Contents |
+|--------|------|----------|
+| `agent_rsi/` | **RSI (agent brain)** | Per-run notes on recipe/agent improvements (perf, connectors, procedure edits) |
+| `learning/` | **Self-learning (domain)** | Tuning rounds, selected configs, objective-metric reports |
+| `merges/` | MR / handoff | Clippable MR exports, merge notes |
+
+**Legacy:** `rsi/` = old name; new runs use `agent_rsi/` + `learning/`. Domain tuning artifacts **must not** live under `agent_rsi/`.
 
 | Stage | CoT (flat or nested) | Artifact |
 |-------|----------------------|----------|
@@ -156,29 +166,86 @@ Per run: **`runs/{run_slug}/interaction_log.md`**. Full recipe: **lsai_superagen
 
 **Prepend algorithm:** **lsai_superagent.md** § **Recipe — Project interaction log (every turn)** → **Prepend algorithm (mandatory — do not truncate)** — read entire log before write; do not truncate.
 
-### RSI — recursive self-improvement (one type per recipe)
+### Three improvement loops (do not conflate)
 
-**One** type per recipe. Internal constants: `_RSI_TYPE`, `_RSI_MAX_ROUNDS`, `_RSI_STOP_CONDITION`, `_RSI_ARTIFACT_DIR`.
+| Loop | Improves | Examples | Does **not** include |
+|------|----------|----------|------------------------|
+| **RSI (agent brain)** | How the agent/recipe/system *works* | Parallelization, timeouts, slice-first probes, progress UX, new data sources, Schwab connector, recipe `.md` edits | Tuning strategy params, improving returns/IC |
+| **Self-learning (domain)** | Stated *functional* objective / KPI | Grid-search `predict_config`, portfolio rules, keyword weights, drift refresh thresholds | Changing agent procedures or repo layout |
+| **Self-healing** | Recover *this run* when something breaks | Missing model → retrain; wrong branch; stalled job → diagnose | Long-horizon brain or strategy improvement |
+
+**Push back** if the user asks to “RSI returns” or “RSI the model”—that is **self-learning**, not RSI.
+
+### RSI — recursive self-improvement (agent brain)
+
+**Purpose:** Improve agent logic, recipes, connectors, and performance—not domain KPIs.
+
+**One** type per recipe. Internal constants: `_RSI_TYPE`, `_RSI_MAX_ROUNDS`, `_RSI_STOP_CONDITION`, `_RSI_ARTIFACT_DIR` (default `runs/{run_slug}/agent_rsi/`).
 
 | Type | Id | Stop when |
 |------|-----|-----------|
 | Error-log | `error_log` | No matching error patterns in named logs |
 | Test-suite | `test_suite` | Suite green (exit 0) |
-| External-metric | `external_metric` | `_RSI_STOP_CONDITION` on metric / other recipe output |
+| Recipe-authoring | `recipe_authoring` | Curated `.cursor/context/*.md` updated from telemetry (sanitizer Step 9) |
 
-**Pick:** logs → (a); tests → (b); KPI/visual/cross-recipe → (c). **Loop:** run → check stop → evidence in `_RSI_ARTIFACT_DIR` → repeat or push back at max rounds.
+**Pick:** logs → (a); tests → (b); procedure/perf/recipe gaps → (c) or child **Recipe — Slice-first performance gate**. **Loop:** run → check stop → evidence in `_RSI_ARTIFACT_DIR` → repeat or push back at max rounds.
 
-*(Authoring RSI in **lsai_superagent.md** § Base L345 refresher is separate—markdown edits from telemetry, not runtime (a)/(b)/(c).)*
+*(Sanitizer Step 9 RSI = **recipe_authoring** type. Do not use RSI for domain metric grids.)*
+
+### Self-learning (domain objective)
+
+**Purpose:** Improve the product’s stated outcome (returns, accuracy, hit rate, latency SLA *as a product metric*, etc.) by tuning **domain parameters** or **models**—not by rewriting agent recipes.
+
+**One** type per domain recipe. Internal constants: `_LEARN_TYPE`, `_LEARN_MAX_ROUNDS`, `_LEARN_STOP_CONDITION`, `_LEARN_ARTIFACT_DIR` (default `runs/{run_slug}/learning/`).
+
+| Type | Id | Stop when |
+|------|-----|-----------|
+| External-metric | `external_metric` | `_LEARN_STOP_CONDITION` on backtest / portfolio / validation output |
+| Human-label | `human_label` | Label quality gate met (when applicable) |
+
+**Loop:** evaluate baseline → propose param/strategy delta → re-evaluate on same holdout → save best config + report in `_LEARN_ARTIFACT_DIR`.
+
+**Domain recipes** declare `_LEARN_STOP_CONDITION` (e.g. IC ≥ 0.12 **and** portfolio excess ≥ 0). Cite **Recipe — Self-learning (domain objective)**; do not label this block **RSI**.
+
+## Recipe — Self-learning (domain objective)
+
+**Purpose:** Canonical loop for tuning domain parameters until objective metrics improve or rounds exhaust.
+
+### Formal parameters
+
+| Parameter | Type | Required / Optional / Default | Description |
+|-----------|------|-------------------------------|-------------|
+| `{learn_candidates}` | list | **Required** | Named configs or param grid (domain-owned) |
+| `{learn_max_rounds}` | int | **Default:** `5` | Max tuning rounds (`0` = full grid) |
+| `{learn_stop_condition}` | string | **Required** | Testable gate on objective metrics |
+| `{learn_artifact_dir}` | path | **Default:** `runs/{run_slug}/learning/` | Round JSON + summary report |
+
+### Run
+
+1. **Baseline** — run evaluation recipe (backtest, portfolio sim, etc.); record metrics.
+2. **Probe** — if evaluation is slow, run **Recipe — Slice-first performance gate** first (that gate is **RSI**, not self-learning).
+3. **Tune** — score each candidate; pick best by domain composite (product defines weights).
+4. **Persist** — write selected config to `models/` (or domain path); summary to `{learn_artifact_dir}`.
+5. **Verify** — re-run evaluation with selected config; metrics ≥ baseline or stop condition met.
+
+**Verify:** Artifacts under `learning/` only; no domain tuning files under `agent_rsi/`.
+
+#### Self-healing
+
+| Symptom | Recover |
+|---------|---------|
+| All candidates worse than baseline | Keep baseline; log in `learning/learn_summary.md`; push back on stop condition |
+| Evaluation window mismatch | Align train/eval windows in domain recipe before more rounds |
 
 ### Self-healing
 
 **Drift** (skipped step, wrong file, Verify ignored) → **Stop** → **Assess** vs recipe state → **Diagnose** one cause → **Recover** with recipe-specific steps or **push back**.
 
-Each recipe: **`#### Self-healing`** with symptom → assess → recover bullets for **this** recipe’s artifacts and RSI type.
+Each recipe: **`#### Self-healing`** with symptom → assess → recover bullets for **this** recipe’s artifacts (orthogonal to RSI and self-learning loops).
 
 ## Recipe — Slice-first performance gate (data pipelines)
 
-**Purpose:** Before any full-corpus or multi-month batch job, profile on a **small slice**, fix hot paths, then scale. Applies to ingest, keyword fill, backtest, RSI, and any loop over 10k+ rows.
+**Purpose:** Before any full-corpus or multi-month batch job, profile on a **small slice**, fix hot paths, then scale. Applies to ingest, keyword fill, backtest, self-learning eval, and any loop over 10k+ rows. This recipe is **RSI (agent brain)**—not domain self-learning.
 
 **Child recipes:** Domain parents (e.g. **aitrader_subagent.md** § prediction backtest) cite this recipe and add **domain budgets** only—do not duplicate the gate steps.
 
@@ -387,7 +454,7 @@ Do **not** confuse this with **Recipe — Clippable MR generation (git paste)** 
 | **`_RSI_TYPE`** | `external_metric` |
 | **`_RSI_MAX_ROUNDS`** | `5` |
 | **`_RSI_STOP_CONDITION`** | `manifest.json` validates; required layer files exist; current `git branch --show-current` equals `manifest.git_branch` (or user explicitly waives with reason in `merges/`) |
-| **`_RSI_ARTIFACT_DIR`** | `~/data/{project_slug}/runs/{run_slug}/rsi/` |
+| **`_RSI_ARTIFACT_DIR`** | `~/data/{project_slug}/runs/{run_slug}/agent_rsi/` |
 
 **Metric:** Pack integrity checklist—every required path present, JSON parseable, CoT non-empty for layers marked **complete**.
 
@@ -427,7 +494,8 @@ Do **not** confuse this with **Recipe — Clippable MR generation (git paste)** 
       steps.md
       meta.json
   merges/
-  rsi/
+  agent_rsi/
+  learning/
 ```
 
 **`manifest.json` (required fields):**
@@ -458,7 +526,7 @@ Do **not** confuse this with **Recipe — Clippable MR generation (git paste)** 
 **Run:**
 
 1. **Pushback** formal parameters (above).
-2. `mkdir -p ~/data/{project_slug}/runs/{run_slug}/{specification,design,execution/shared,merges,rsi}`; create `interaction_log.md` (full header) and `meta.json` with `run_slug` + `"status": "active"`; update **repo_overview** § **Active run**.
+2. `mkdir -p ~/data/{project_slug}/runs/{run_slug}/{specification,design,execution/shared,merges,agent_rsi,learning}`; create `interaction_log.md` (full header) and `meta.json` with `run_slug` + `"status": "active"`; update **repo_overview** § **Active run**.
 3. Write `manifest.json` + `MANIFEST.md` (include gzip command template).
 4. Create `execution/tracks.json` from `{execution_tracks}`; `mkdir` each `execution/<track>/`.
 5. Seed `specification/spec.md` with problem statement and **Goals / Non-goals / Open questions** headings.
