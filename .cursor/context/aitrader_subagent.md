@@ -111,9 +111,13 @@ Portfolio allocator → buy/sell recommendations
 | Yahoo connector | `src/aitrader/data/yahoo.py` | **Recipe — Yahoo Finance historical data ingest** |
 | Sector starters | `src/aitrader/config/sector_starters.yaml` | 11 GICS sectors × 10 names + SPY/IWM |
 | Schwab connector | `src/aitrader/data/schwab.py` | **Recipe — Charles Schwab API setup and connector** |
+| News ingest | `src/aitrader/nlp/news.py` | **Recipe — Macro news ingest and clustering** (ingest slice) |
+| News feeds config | `src/aitrader/config/news_feeds.yaml` | Fed, BLS, BEA, Treasury RSS |
+| Cursor keyword extract | `src/aitrader/nlp/cursor_extract.py` | **Recipe — Cursor keyword extraction** |
+| Keyword cache | `src/aitrader/nlp/keyword_cache.py` | Shared cache + phrase grounding |
 | Keyword discovery | `src/aitrader/nlp/keywords.py` | **Recipe — Sentiment keyword discovery** |
 | Drift monitor | `src/aitrader/ml/drift.py` | **Recipe — Concept drift detection** |
-| News clusterer | `src/aitrader/nlp/cluster.py` | **Recipe — Macro news ingest and clustering** |
+| News clusterer | `src/aitrader/nlp/cluster.py` | **Recipe — Macro news ingest and clustering** (cluster slice) |
 | Predictor | `src/aitrader/ml/predict.py` | **Recipe — Multi-horizon price prediction** |
 | Portfolio | `src/aitrader/portfolio/allocate.py` | **Recipe — Portfolio allocation (fixed capital)** |
 
@@ -122,8 +126,8 @@ Portfolio allocator → buy/sell recommendations
 | Global Layer | Name | Delivers |
 |--------------|------|----------|
 | **L1** | Data plane | Yahoo ingest, universe, OHLCV cache *(shipped)* |
-| **L2** | NLP features | News ingest, keyword discovery, clustering |
-| **L3** | Models + drift | Historical fit, drift monitor, refresh loop |
+| **L2** | NLP features | News ingest, keyword discovery, clustering *(ingest + keywords shipped)* |
+| **L3** | Models + drift | Historical fit, drift monitor, refresh loop *(shipped)* |
 | **L4** | Prediction | Multi-horizon heads for SPY/RUT + sectors |
 | **L5** | Portfolio | Fixed-capital allocator, buy/sell report |
 | **L6** | Expansion | Full-universe scan, Schwab live quotes |
@@ -165,7 +169,8 @@ Portfolio allocator → buy/sell recommendations
 | **Recipe — Sector universe definition** | Step 1; missing or stale `universe.csv` | `{anchor_indices}`, `{universe_mode}` |
 | **Recipe — Yahoo Finance historical data ingest** | Step 2; `{data_provider}=yahoo` | `{lookback_years}`, tickers from universe |
 | **Recipe — Charles Schwab API setup and connector** | Step 2; Yahoo fails or `{data_provider}=schwab` | Schwab tokens from env |
-| **Recipe — Sentiment keyword discovery** | Step 3; missing or drift refresh | `{lookback_years}`, sector ids |
+| **Recipe — Cursor keyword extraction** | Step 3a; before IC fit | `{batch_size}`, `{run_dir}` |
+| **Recipe — Sentiment keyword discovery** | Step 3b; after Cursor cache | `{lookback_years}`, sector ids |
 | **Recipe — Concept drift detection** | Step 4; every run before predict | `{drift_threshold}` |
 | **Recipe — Macro news ingest and clustering** | Step 5 | `{news_sources}`, date range |
 | **Recipe — Multi-horizon price prediction** | Step 6 | `{horizons}`, `{anchor_indices}` |
@@ -196,12 +201,13 @@ Portfolio allocator → buy/sell recommendations
 1. Resolve `{run_slug}`; `mkdir -p ~/data/{project_slug}/runs/{run_slug}/{config,data,models,reports,rsi}`; update `meta.json` with bound params.
 2. Invoke **Recipe — Sector universe definition**.
 3. Invoke data child: **Yahoo** (default) or **Schwab** on failure/user choice.
-4. Invoke **Recipe — Sentiment keyword discovery** (skip if keyword maps exist and drift not triggered).
-5. Invoke **Recipe — Concept drift detection**; if `refresh_recommended`, re-run keyword discovery.
-6. Invoke **Recipe — Macro news ingest and clustering**.
-7. Invoke **Recipe — Multi-horizon price prediction**.
-8. Invoke **Recipe — Portfolio allocation (fixed capital)**.
-9. Write summary `reports/run_summary_{date}.md` with top buys/sells per horizon and drift status.
+4. Invoke **Recipe — Cursor keyword extraction** (prepare → agent batch JSON → apply → finalize).
+5. Invoke **Recipe — Sentiment keyword discovery** on Cursor cache (skip if maps exist and drift not triggered).
+6. Invoke **Recipe — Concept drift detection**; if `refresh_recommended`, re-run Cursor + keyword discovery.
+7. Invoke **Recipe — Macro news ingest and clustering**.
+8. Invoke **Recipe — Multi-horizon price prediction**.
+9. Invoke **Recipe — Portfolio allocation (fixed capital)**.
+10. Write summary `reports/run_summary_{date}.md` with top buys/sells per horizon and drift status.
 
 **Verify:** `reports/predictions_{date}.csv` and `reports/portfolio_{date}.csv` exist; SPY and IWM rows present for all `{horizons}`; `meta.json` lists completed child recipes.
 
@@ -336,6 +342,41 @@ Portfolio allocator → buy/sell recommendations
 
 ---
 
+## Recipe — Cursor keyword extraction (primary)
+
+**Purpose:** **Cursor agent (CoT)** labels news articles with macro/sector keyword phrases — **no OpenAI API key**. Same prepare → agent → apply pattern as vidtrain step 2.
+
+### Formal parameters
+
+| Parameter | Type | Required / Optional / Default | Description |
+|-----------|------|-------------------------------|-------------|
+| `{batch_size}` | int | **Default:** `8` | Articles per Cursor batch brief |
+| `{run_dir}` | path | **Required** | Active run workspace |
+
+### Child recipes
+
+| Child | When |
+|-------|------|
+| **Recipe — Sentiment keyword discovery** | After cache populated — IC fit on Cursor phrases |
+
+### Run
+
+1. `python -m aitrader keywords prepare-cursor --run-dir {run_dir}` — writes `data/news/cursor_batches/batch_NNN.md` + `_in.json`.
+2. **Cursor agent:** read each batch `.md`; write `batch_NNN_out.json` (JSON shape in brief footer). Or `keywords fill-cursor` applies the same macro policy in-repo for bootstrap.
+3. `python -m aitrader keywords apply-cursor --run-dir {run_dir} --batch N` — or `apply-all-cursor` for every `*_out.json`.
+4. `python -m aitrader keywords finalize-cursor --run-dir {run_dir}` when done.
+5. `python -m aitrader keywords discover --run-dir {run_dir}` — IC validation (uses cache; `--no-llm` for token fallback).
+
+**One-shot:** `bash .cursor/scripts/run_cursor_keywords.sh {run_dir}` — runs `keywords run-cursor` (prepare + fill + apply-all + finalize + discover).
+
+**CoT backtrack:** append agent notes to `{run_dir}/cot/cursor_keywords.cot.md` per batch checkpoint.
+
+**Optional comparison track:** `keywords extract-openai` (requires `OPENAI_API_KEY`) — not primary.
+
+**Verify:** `llm_keywords.jsonl` row count increases per `apply-cursor`; `meta.json` → `cursor_keywords.batches_done`; discover report shows `cursor+ic`.
+
+---
+
 ## Recipe — Sentiment keyword discovery
 
 **Purpose:** From historical news + returns, discover keywords/phrases whose sentiment correlates with future price moves per sector.
@@ -347,13 +388,13 @@ Portfolio allocator → buy/sell recommendations
 | `{label_horizon}` | enum | **Default:** `1m` | Return label horizon for keyword fit |
 | `{min_keyword_ic}` | number | **Default:** `0.03` | Minimum information coefficient to keep |
 | `{max_keywords_per_sector}` | int | **Default:** `50` | Cap vocabulary size |
-| `{nlp_model}` | string | **Default:** `finbert` | Embedding/sentiment model id |
+| `{keyword_source}` | enum | **Default:** `cursor` | `cursor` (cached phrases) or `tokens` (bag-of-words fallback) |
 
 ### Run
 
-1. Build labeled dataset: for each news item, compute forward return per ticker/sector ETF at `{label_horizon}`.
-2. Extract n-grams and named entities; score sentiment via `{nlp_model}`.
-3. Regress forward returns on keyword presence + sentiment; keep keywords with \|IC\| ≥ `{min_keyword_ic}`.
+1. Prefer **Recipe — Cursor keyword extraction** cache in `llm_keywords.jsonl`; fallback to token extract if missing.
+2. Build labeled dataset: forward return per ticker/sector ETF at `{label_horizon}`.
+3. Score keyword presence; keep phrases with \|IC\| ≥ `{min_keyword_ic}`.
 4. Write `models/keyword_map_{sector_id}.json`:
    ```json
    {"keyword": "rate cut", "coef": 0.012, "ic": 0.05, "direction": "bullish", "last_fit": "2026-06-07"}
@@ -510,10 +551,10 @@ Portfolio allocator → buy/sell recommendations
 |-------|------|-------------|--------|
 | L1 | 1 | Sector universe + Yahoo OHLCV ingest | completed |
 | L1 | 2 | CLI scaffold + run workspace layout | completed |
-| L2 | 1 | Macro news ingest + jsonl schema | pending |
-| L2 | 2 | Sentiment keyword discovery (historical) | pending |
-| L3 | 1 | Concept drift detection + refresh loop | pending |
-| L3 | 2 | News clustering vs historical regimes | pending |
+| L2 | 1 | Macro news ingest + jsonl schema | completed |
+| L2 | 2 | Cursor keyword extraction + IC discovery | completed |
+| L3 | 1 | Concept drift detection + refresh loop | completed |
+| L3 | 2 | News clustering vs historical regimes | completed |
 | L4 | 1 | Multi-horizon prediction (SPY, IWM, sectors) | pending |
 | L5 | 1 | Portfolio allocation (fixed capital) | pending |
 | L6 | 1 | Schwab connector + full-universe mode | pending |
@@ -524,15 +565,19 @@ Portfolio allocator → buy/sell recommendations
 - **Router wired:** `router.md` topic clusters for macro trader workflows.
 - **L1 shipped:** `src/aitrader/` package — `workspace.py`, `universe.py`, `data/yahoo.py`, `cli.py`; bundled `sector_starters.yaml` (11 sectors × 10 + SPY/IWM anchors = 112 tickers).
 - **L1 verified:** `pytest tests/` (8 passed); active run has `universe.csv` (112 rows), `ohlcv_manifest.json` (112/112 ok), SPY parquet (1255 rows).
+- **L2 shipped:** `nlp/news.py` (RSS + Yahoo → jsonl corpus), `nlp/cursor_extract.py` (prepare/apply/finalize), `nlp/keywords.py` (IC on Cursor cache), `config/news_feeds.yaml`.
+- **L2 verified:** 1115 articles ingested; Cursor batches under `data/news/cursor_batches/`; `llm_keywords.jsonl` + refreshed `keyword_map_*.json` after `run-cursor`.
+- **L3 shipped:** `ml/drift.py` (IC drift + 2-run refresh guard), `nlp/cluster.py` (TF-IDF + KMeans regimes).
+- **L3 verified:** `drift_{date}.md`, `news_clusters.pkl`, `current_cluster.json`; tests 18 passed.
 
 #### TODO
 
-- None (L1 complete).
+- None (L3 complete).
 
 #### TODO Next release
 
 - Schwab OAuth CLI and live quote path.
-- FinBERT (or equivalent) keyword discovery pipeline.
+- Manual per-batch Cursor CoT refinement (replace policy fill for higher-quality phrases).
 
 #### TODO Future release
 

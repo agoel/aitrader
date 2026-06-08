@@ -53,6 +53,8 @@ Last updated: May 5 2026
 
 **Prior runs:** *(none yet — when you start a new run, list the previous `{run_slug}` here for resume context.)*
 
+**L2 Cursor keywords (primary):** After L1 OHLCV + news corpus, run `bash .cursor/scripts/run_cursor_keywords.sh` with the run directory above. CoT notes: `{run_dir}/cot/cursor_keywords.cot.md`. Recipe: **`aitrader_subagent.md`** § **Recipe — Cursor keyword extraction (primary)**.
+
 ### Project interaction log (per run)
 
 **Purpose:** Resume agent work from disk without re-reading the full Cursor chat. **Canonical templates** (header + turn block) live **here**. Rules + prepend algorithm: **`lsai_superagent.md`** § **Recipe — Project interaction log (every turn)**. **One log per run** under **`runs/{run_slug}/`**. **Fill § Active run** at bootstrap.

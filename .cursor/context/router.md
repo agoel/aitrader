@@ -29,6 +29,7 @@ When the user prompts something, use **user context in Cursor memory** + **the p
 
 macro ai trader (6)
 sector universe (5)
+cursor keyword extraction (5)
 sentiment keywords (5)
 concept drift (5)
 macro news prediction (5)
@@ -63,7 +64,8 @@ l345_router.md: stack bootstrap, stack bootstrap portable, superagent install
 | Sector universe definition | recipe | `aitrader_subagent.md` | `## Recipe — Sector universe definition` | Define sectors; pick 10–12 stocks each |
 | Yahoo Finance historical data ingest | recipe | `aitrader_subagent.md` | `## Recipe — Yahoo Finance historical data ingest` | Pull OHLCV without API key |
 | Charles Schwab API setup and connector | recipe | `aitrader_subagent.md` | `## Recipe — Charles Schwab API setup and connector` | OAuth + quotes when Yahoo fails |
-| Sentiment keyword discovery | recipe | `aitrader_subagent.md` | `## Recipe — Sentiment keyword discovery` | Historical keyword→return fit |
+| Cursor keyword extraction | recipe | `aitrader_subagent.md` | `## Recipe — Cursor keyword extraction (primary)` | CoT batch labeling (no API key) |
+| Sentiment keyword discovery | recipe | `aitrader_subagent.md` | `## Recipe — Sentiment keyword discovery` | IC fit on Cursor phrases |
 | Concept drift detection | recipe | `aitrader_subagent.md` | `## Recipe — Concept drift detection` | Detect hypothesis decay; trigger refresh |
 | Macro news ingest and clustering | recipe | `aitrader_subagent.md` | `## Recipe — Macro news ingest and clustering` | Ingest and cluster current news |
 | Multi-horizon price prediction | recipe | `aitrader_subagent.md` | `## Recipe — Multi-horizon price prediction` | 2w / 1m / 3m forecasts |
@@ -86,9 +88,15 @@ l345_router.md: stack bootstrap, stack bootstrap portable, superagent install
 - aitrader_subagent.md | section: Recipe — Sector universe definition
 - aitrader_subagent.md | section: (a) Design Section | sub-section: Technical Implementation Details
 
+### cursor keyword extraction
+
+- aitrader_subagent.md | section: Recipe — Cursor keyword extraction (primary)
+- aitrader_subagent.md | section: (a) Design Section | sub-section: Technical Implementation Details
+
 ### sentiment keywords
 
 - aitrader_subagent.md | section: Recipe — Sentiment keyword discovery
+- aitrader_subagent.md | section: Recipe — Cursor keyword extraction (primary)
 - aitrader_subagent.md | section: (a) Design Section | sub-section: Technical Implementation Details
 
 ### concept drift

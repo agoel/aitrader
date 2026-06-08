@@ -68,6 +68,20 @@ Success line: **`Stack bootstrap complete: <project_slug>`**
 
 Open the project in Cursor and work normally. Agents run **Context Discovery** from **`l345_router.md`** every turn and prepend turns to the interaction log under **`~/data/`**.
 
+### AITrader — L2 Cursor keywords (after L1 data plane)
+
+From the active run in **`repo_overview.md`** § **Active run**:
+
+```bash
+cd /path/to/aitrader
+python3 -m venv .venv && .venv/bin/pip install -e ".[dev]"
+
+# One-shot: prepare batches → agent macro phrases → apply → IC discover
+bash .cursor/scripts/run_cursor_keywords.sh ~/data/aitrader/runs/<run_slug>
+```
+
+Manual CoT: open `data/news/cursor_batches/batch_NNN.md` in Cursor; write `batch_NNN_out.json`; checkpoint with `keywords apply-cursor`. See **`aitrader_subagent.md`** § **Recipe — Cursor keyword extraction (primary)**.
+
 Optional:
 
 ```bash

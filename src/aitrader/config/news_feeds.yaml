@@ -1,0 +1,21 @@
+# Macro-economic RSS feeds for news ingest (no API key).
+feeds:
+  - id: fed_press
+    name: Federal Reserve — Press Releases
+    url: https://www.federalreserve.gov/feeds/press_all.xml
+    tags: [macro, fed, rates]
+
+  - id: bls_latest
+    name: Bureau of Labor Statistics
+    url: https://www.bls.gov/feed/bls_latest.rss
+    tags: [macro, labor, inflation]
+
+  - id: bea_news
+    name: Bureau of Economic Analysis
+    url: https://www.bea.gov/rss.xml
+    tags: [macro, gdp]
+
+  - id: treasury_press
+    name: U.S. Treasury — Press Releases
+    url: https://home.treasury.gov/system/files/RSS/TreasuryPressReleases.xml
+    tags: [macro, fiscal]
