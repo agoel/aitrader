@@ -6,7 +6,16 @@ import json
 from pathlib import Path
 from typing import Any
 
-RUN_SUBDIRS = ("config", "data", "data/ohlcv", "models", "reports", "rsi")
+RUN_SUBDIRS = (
+    "config",
+    "data",
+    "data/ohlcv",
+    "models",
+    "reports",
+    "agent_rsi",
+    "learning",
+    "rsi",  # legacy — domain tune artifacts moved to learning/
+)
 
 
 def expand_run_dir(run_dir: str | Path) -> Path:

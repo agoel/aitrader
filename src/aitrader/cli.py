@@ -9,8 +9,9 @@ from pathlib import Path
 from aitrader.data.yahoo import ingest_universe
 from aitrader.ml.drift import run_drift_detection
 from aitrader.ml.backtest import run_prediction_backtest
-from aitrader.ml.portfolio_backtest import run_spy_portfolio_backtest
-from aitrader.ml.rsi_predict import run_prediction_rsi
+from aitrader.ml.option_range_study import run_option_range_study
+from aitrader.ml.portfolio_backtest import compare_portfolio_schedules, run_spy_portfolio_backtest
+from aitrader.ml.learn_predict import run_prediction_tune
 from aitrader.ml.predict import run_predictions, train_horizon_models
 from aitrader.nlp.cluster import fit_news_clusters
 from aitrader.nlp.keywords import discover_sector_keywords
@@ -25,6 +26,7 @@ from aitrader.nlp.cursor_extract import (
 from aitrader.nlp.news import ingest_historical_news, ingest_news
 from aitrader.universe import write_universe
 from aitrader.progress import pipeline_phase
+from aitrader.agent_rsi import log_agent_rsi, probe_backtest_performance, seed_session_improvements
 from aitrader.workspace import ensure_run_layout, update_meta
 
 
@@ -65,6 +67,13 @@ def _cmd_universe_build(args: argparse.Namespace) -> None:
 def _cmd_data_yahoo(args: argparse.Namespace) -> None:
     manifest = ingest_universe(args.run_dir, years=getattr(args, "years", 5))
     print(f"Wrote {manifest}")
+
+
+def _cmd_data_cot(args: argparse.Namespace) -> None:
+    from aitrader.data.cot import ingest_cot
+
+    path = ingest_cot(args.run_dir, years=getattr(args, "years", 6))
+    print(f"Wrote {path}")
 
 
 def _cmd_l1(args: argparse.Namespace) -> None:
@@ -287,9 +296,66 @@ def _cmd_predict_backtest(args: argparse.Namespace) -> None:
         include_monthly_spy=not args.no_monthly_spy,
         include_walk_forward=args.walk_forward,
         quiet=args.quiet,
+        run_probe=not args.skip_probe,
     )
     print(f"Wrote {csv_path}")
     print(f"Wrote {report}")
+
+
+def _cmd_option_range_study(args: argparse.Namespace) -> None:
+    df, summary, report = run_option_range_study(
+        args.run_dir,
+        news_window_days=args.window_days,
+        lookback_years=args.years,
+        min_train_months=args.min_train_months,
+        eval_start=getattr(args, "start", None),
+        eval_end=getattr(args, "end", None),
+    )
+    print(f"Wrote {report}")
+    print(
+        f"Expiry-aligned: {summary['n_expiry_cycles']} cycles | "
+        f"inside band {summary['inside_band_pct']}% | "
+        f"breach lower {summary['breach_lower_pct']}% | "
+        f"breach upper {summary['breach_upper_pct']}%"
+    )
+    if "csp_at_model_lower_assigned_pct" in summary:
+        print(
+            f"CSP at model lower: assigned {summary['csp_at_model_lower_assigned_pct']}% of months"
+        )
+        for buf in (2, 5):
+            k = f"csp_assigned_{buf}pct_buffer_pct"
+            if k in summary:
+                print(f"  with {buf}% OTM buffer: assigned {summary[k]}%")
+
+
+def _cmd_portfolio_schedule_compare(args: argparse.Namespace) -> None:
+    report, comparison = compare_portfolio_schedules(
+        args.run_dir,
+        capital_usd=args.capital_usd,
+        lookback_years=args.years,
+        news_window_days=args.window_days,
+        min_train_months=args.min_train_months,
+    )
+    bh = comparison["buy_hold"]
+    monthly = comparison["monthly_signal"]
+    ladder = comparison["weekly_ladder_always"]
+    print(f"Wrote {report}")
+    print(
+        f"Buy & hold: ${bh['final_value_usd']:,.2f} ({bh['total_return_pct']:+.2f}%)"
+    )
+    print(
+        f"Monthly signal: ${monthly['final_value_usd']:,.2f} "
+        f"({monthly['total_return_pct']:+.2f}%, {monthly['excess_return_pct']:+.2f} pp vs B&H)"
+    )
+    print(
+        f"Weekly ladder (always): ${ladder['final_value_usd']:,.2f} "
+        f"({ladder['total_return_pct']:+.2f}%, {ladder['excess_return_pct']:+.2f} pp vs B&H)"
+    )
+    sig = comparison["weekly_ladder_signal"]
+    print(
+        f"Weekly ladder (signal): ${sig['final_value_usd']:,.2f} "
+        f"({sig['total_return_pct']:+.2f}%, {sig['excess_return_pct']:+.2f} pp vs B&H)"
+    )
 
 
 def _cmd_portfolio_backtest_spy(args: argparse.Namespace) -> None:
@@ -314,28 +380,74 @@ def _cmd_predict_train(args: argparse.Namespace) -> None:
     print(f"Trained {len(models)} horizon models")
 
 
-def _cmd_predict_rsi(args: argparse.Namespace) -> None:
-    summary = run_prediction_rsi(
+def _cmd_predict_tune(args: argparse.Namespace) -> None:
+    summary = run_prediction_tune(
         args.run_dir,
         max_rounds=args.max_rounds,
         news_window_days=args.window_days,
         use_grid=not args.no_grid,
+        run_probe=not args.skip_probe,
+        objective=args.objective,
     )
     print(json.dumps(summary, indent=2))
     tier = summary.get("certainty", "low")
     if summary.get("passes"):
-        print(f"RSI stop: certainty gates passed (tier={tier}).")
+        print(f"Tune stop: objective gates passed (tier={tier}).")
     else:
-        print(f"RSI stop: max rounds — best config saved (tier={tier}).")
+        print(f"Tune stop: grid complete — best config saved (tier={tier}).")
+
+
+def _cmd_predict_rsi(args: argparse.Namespace) -> None:
+    import warnings
+
+    warnings.warn(
+        "predict rsi is deprecated; use: python -m aitrader predict tune",
+        DeprecationWarning,
+        stacklevel=2,
+    )
+    _cmd_predict_tune(args)
+
+
+def _cmd_agent_rsi_probe(args: argparse.Namespace) -> None:
+    report = probe_backtest_performance(
+        args.run_dir,
+        slice_months=args.slice_months,
+        slice_macro_days=args.slice_macro_days,
+        budget_sec=args.budget_sec,
+        news_window_days=args.window_days,
+        quiet=args.quiet,
+    )
+    print(json.dumps(report, indent=2))
+    if not report.get("passes_gate"):
+        raise SystemExit(1)
+
+
+def _cmd_agent_rsi_log(args: argparse.Namespace) -> None:
+    path = log_agent_rsi(
+        args.run_dir,
+        args.topic,
+        symptom=args.symptom,
+        fix=args.fix,
+        verify=args.verify or "",
+    )
+    print(f"Wrote {path}")
+
+
+def _cmd_agent_rsi_seed(args: argparse.Namespace) -> None:
+    paths = seed_session_improvements(args.run_dir)
+    print(f"Seeded {len(paths)} agent RSI entries")
+    for p in paths:
+        print(f"  {p}")
 
 
 def _cmd_l4(args: argparse.Namespace) -> None:
-    """Run L4: train → predict → backtest → RSI tune."""
+    """Run L4: train → predict → backtest → self-learning tune."""
     _cmd_predict_run(args)
     if not args.skip_backtest:
         _cmd_predict_backtest(args)
-    if not args.skip_rsi:
-        _cmd_predict_rsi(args)
+    skip_tune = getattr(args, "skip_tune", False) or getattr(args, "skip_rsi", False)
+    if not skip_tune:
+        _cmd_predict_tune(args)
     print("L4 complete.")
 
 
@@ -400,6 +512,11 @@ def main(argv: list[str] | None = None) -> None:
     _add_run_dir(yahoo_p)
     yahoo_p.add_argument("--years", type=float, default=5)
     yahoo_p.set_defaults(func=_cmd_data_yahoo)
+
+    cot_p = data_sub.add_parser("cot", help="CFTC Commitment of Traders (E-mini S&P 500)")
+    _add_run_dir(cot_p)
+    cot_p.add_argument("--years", type=float, default=6)
+    cot_p.set_defaults(func=_cmd_data_cot)
 
     l1_p = sub.add_parser("l1", help="Run L1 end-to-end (init + universe + yahoo)")
     _add_run_dir(l1_p)
@@ -581,6 +698,38 @@ def main(argv: list[str] | None = None) -> None:
     l3_p.add_argument("--min-ic", type=float, default=0.03)
     l3_p.set_defaults(func=_cmd_l3)
 
+    agent_rsi_p = sub.add_parser(
+        "agent-rsi",
+        help="Agent-brain RSI: perf probes and improvement logs (not domain tune)",
+    )
+    agent_rsi_sub = agent_rsi_p.add_subparsers(dest="agent_rsi_cmd", required=True)
+    ar_probe_p = agent_rsi_sub.add_parser(
+        "probe",
+        help="Slice-first backtest perf probe (blocks if extrapolation too slow)",
+    )
+    _add_run_dir(ar_probe_p)
+    ar_probe_p.add_argument("--window-days", type=int, default=30)
+    ar_probe_p.add_argument("--slice-months", type=int, default=3)
+    ar_probe_p.add_argument("--slice-macro-days", type=int, default=10)
+    ar_probe_p.add_argument("--budget-sec", type=float, default=60.0)
+    _add_quiet(ar_probe_p)
+    ar_probe_p.set_defaults(func=_cmd_agent_rsi_probe)
+
+    ar_log_p = agent_rsi_sub.add_parser("log", help="Append agent RSI improvement entry")
+    _add_run_dir(ar_log_p)
+    ar_log_p.add_argument("--topic", required=True)
+    ar_log_p.add_argument("--symptom", required=True)
+    ar_log_p.add_argument("--fix", required=True)
+    ar_log_p.add_argument("--verify", default="")
+    ar_log_p.set_defaults(func=_cmd_agent_rsi_log)
+
+    ar_seed_p = agent_rsi_sub.add_parser(
+        "seed",
+        help="Write idempotent log entries for shipped perf/agent improvements",
+    )
+    _add_run_dir(ar_seed_p)
+    ar_seed_p.set_defaults(func=_cmd_agent_rsi_seed)
+
     predict_p = sub.add_parser("predict", help="Multi-horizon prediction commands")
     predict_sub = predict_p.add_subparsers(dest="predict_cmd", required=True)
     predict_run_p = predict_sub.add_parser("run", help="Score universe at 2w/1m/3m horizons")
@@ -613,22 +762,49 @@ def main(argv: list[str] | None = None) -> None:
         action="store_true",
         help="Also run article-level walk-forward (slow on large corpus)",
     )
+    predict_bt_p.add_argument(
+        "--skip-probe",
+        action="store_true",
+        help="Skip agent RSI perf probe before full backtest",
+    )
     _add_quiet(predict_bt_p)
     predict_bt_p.set_defaults(func=_cmd_predict_backtest)
 
-    predict_rsi_p = predict_sub.add_parser(
-        "rsi",
-        help="RSI loop: tune prediction config until backtest certainty gates pass",
+    predict_tune_p = predict_sub.add_parser(
+        "tune",
+        help="Self-learning: tune prediction config until objective gates pass",
     )
-    _add_run_dir(predict_rsi_p)
-    predict_rsi_p.add_argument("--window-days", type=int, default=30)
-    predict_rsi_p.add_argument(
+    _add_run_dir(predict_tune_p)
+    predict_tune_p.add_argument("--window-days", type=int, default=30)
+    predict_tune_p.add_argument(
         "--max-rounds",
         type=int,
         default=0,
         help="Max configs to try (0 = full grid)",
     )
+    predict_tune_p.add_argument("--no-grid", action="store_true")
+    predict_tune_p.add_argument(
+        "--skip-probe",
+        action="store_true",
+        help="Skip agent RSI perf probe before tune grid",
+    )
+    predict_tune_p.add_argument(
+        "--objective",
+        choices=("profit", "composite", "ic"),
+        default="composite",
+        help="Config selection: profit=max $10K SPY sim, composite=balanced, ic=forecast IC",
+    )
+    predict_tune_p.set_defaults(func=_cmd_predict_tune)
+
+    predict_rsi_p = predict_sub.add_parser(
+        "rsi",
+        help="(deprecated) alias for predict tune",
+    )
+    _add_run_dir(predict_rsi_p)
+    predict_rsi_p.add_argument("--window-days", type=int, default=30)
+    predict_rsi_p.add_argument("--max-rounds", type=int, default=0)
     predict_rsi_p.add_argument("--no-grid", action="store_true")
+    predict_rsi_p.add_argument("--skip-probe", action="store_true")
     predict_rsi_p.set_defaults(func=_cmd_predict_rsi)
 
     predict_pf_p = predict_sub.add_parser(
@@ -642,7 +818,38 @@ def main(argv: list[str] | None = None) -> None:
     predict_pf_p.add_argument("--min-train-months", type=int, default=12)
     predict_pf_p.set_defaults(func=_cmd_portfolio_backtest_spy)
 
-    l4_p = sub.add_parser("l4", help="Run L4 end-to-end (predict + backtest + RSI)")
+    predict_cmp_p = predict_sub.add_parser(
+        "schedule-compare",
+        help="Compare monthly signal vs weekly 25% ladder vs buy-and-hold (same period)",
+    )
+    _add_run_dir(predict_cmp_p)
+    predict_cmp_p.add_argument("--capital-usd", type=float, default=10000)
+    predict_cmp_p.add_argument("--years", type=int, default=5)
+    predict_cmp_p.add_argument("--window-days", type=int, default=30)
+    predict_cmp_p.add_argument("--min-train-months", type=int, default=12)
+    predict_cmp_p.set_defaults(func=_cmd_portfolio_schedule_compare)
+
+    predict_range_p = predict_sub.add_parser(
+        "option-range",
+        help="Confidence price bands vs SPY at monthly option expiry (3rd Friday)",
+    )
+    _add_run_dir(predict_range_p)
+    predict_range_p.add_argument("--years", type=int, default=5)
+    predict_range_p.add_argument("--window-days", type=int, default=30)
+    predict_range_p.add_argument("--min-train-months", type=int, default=12)
+    predict_range_p.add_argument(
+        "--start",
+        default=None,
+        help="Evaluation start (YYYY-MM-DD), e.g. 2005-01-01",
+    )
+    predict_range_p.add_argument(
+        "--end",
+        default=None,
+        help="Evaluation end (YYYY-MM-DD), e.g. 2015-12-31",
+    )
+    predict_range_p.set_defaults(func=_cmd_option_range_study)
+
+    l4_p = sub.add_parser("l4", help="Run L4 end-to-end (predict + backtest + tune)")
     _add_run_dir(l4_p)
     l4_p.add_argument("--horizons", default="2w,1m,3m")
     l4_p.add_argument("--window-days", type=int, default=7)
@@ -650,8 +857,24 @@ def main(argv: list[str] | None = None) -> None:
     l4_p.add_argument("--min-train-days", type=int, default=3)
     l4_p.add_argument("--no-monthly-spy", action="store_true")
     l4_p.add_argument("--skip-backtest", action="store_true")
-    l4_p.add_argument("--skip-rsi", action="store_true")
-    l4_p.add_argument("--max-rounds", type=int, default=5)
+    l4_p.add_argument("--skip-tune", action="store_true", help="Skip self-learning tune step")
+    l4_p.add_argument(
+        "--skip-rsi",
+        action="store_true",
+        help="(deprecated) alias for --skip-tune",
+    )
+    l4_p.add_argument(
+        "--max-rounds",
+        type=int,
+        default=0,
+        help="Tune configs to try (0 = full grid; passed to predict tune)",
+    )
+    l4_p.add_argument("--no-grid", action="store_true")
+    l4_p.add_argument(
+        "--skip-probe",
+        action="store_true",
+        help="Skip agent RSI perf probe before backtest/tune",
+    )
     l4_p.set_defaults(func=_cmd_l4)
 
     args = parser.parse_args(argv)

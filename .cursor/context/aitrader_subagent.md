@@ -192,16 +192,18 @@ Portfolio allocator → buy/sell recommendations
 
 Examples: parallel keyword fill, progress UX, GDELT/Schwab connectors, backtest perf (feature cache, per-day macro events). **Not** tuning `predict_config` for returns.
 
+**CLI (Phase 3):** `python -m aitrader agent-rsi probe --run-dir {run_dir}` (slice-first gate); `agent-rsi log --topic … --symptom … --fix …`; `agent-rsi seed` (idempotent session logs). `predict backtest` / `predict tune` run probe automatically unless `--skip-probe`.
+
 ### Self-learning (L4 prediction tune)
 
 | Constant | Value |
 |----------|-------|
 | `_LEARN_TYPE` | `external_metric` |
 | `_LEARN_MAX_ROUNDS` | `5` (`0` = full grid) |
-| `_LEARN_STOP_CONDITION` | News-backed: IC ≥ 0.12, hit rate ≥ 65%, coverage ≥ 60%, N ≥ 3; portfolio excess vs B&H ≥ 0 (when sim run) |
+| `_LEARN_STOP_CONDITION` | Forecast: IC ≥ 0.12, hit rate ≥ 65%, coverage ≥ 60%, N ≥ 3; **and** portfolio excess vs B&H ≥ 0 (`passes_full`). Report lists **best IC**, **best $10K**, and **selected (composite)** leaders. |
 | `_LEARN_ARTIFACT_DIR` | `runs/{run_slug}/learning/` |
 
-Cite **lsai_subagents.md** § **Recipe — Self-learning (domain objective)**. CLI today: `predict rsi` → **rename** to `predict tune` (Phase 2).
+Cite **lsai_subagents.md** § **Recipe — Self-learning (domain objective)**. CLI: `python -m aitrader predict tune` (`predict rsi` deprecated alias).
 
 ### Expert pushback
 
@@ -595,7 +597,7 @@ python -m aitrader news ingest-historical --run-dir ~/data/aitrader/runs/{run_sl
 
 **Agent RSI (perf):** `build_backtest_feature_cache` runs expensive feature build **once**; each self-learning candidate only re-scores (~seconds). Cite **Recipe — Slice-first performance gate** before full eval.
 
-**Self-learning (mandatory before L5):** `python -m aitrader predict tune --run-dir {run_dir}` *(alias: `predict rsi` until Phase 2 rename)* — grid over `PredictTuneConfig`; saves `models/predict_config.json` and `learning/predict_tune.md`. Stop per `_LEARN_STOP_CONDITION` in parent **Self-learning** block. `l4` runs tune after backtest unless `--skip-tune` *(alias: `--skip-rsi`)*.
+**Self-learning (mandatory before L5):** `python -m aitrader predict tune --run-dir {run_dir}` — grid over `PredictTuneConfig`; saves `models/predict_config.json`, `learning/tune_round_*.json`, `learning/predict_tune.md`. Stop per `_LEARN_STOP_CONDITION`. `l4` runs tune after backtest unless `--skip-tune` (`--skip-rsi` deprecated).
 
 #### Self-healing
 

@@ -6,6 +6,7 @@ import bisect
 import json
 import math
 import pickle
+import urllib.error
 from collections import Counter, defaultdict
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -26,7 +27,9 @@ from aitrader.ml.predict import (
     _signal_from_articles,
     _train_horizon_model,
 )
+from aitrader.data.cot import cot_signal_at, ensure_cot_data
 from aitrader.ml.predict_config import DEFAULT_CONFIG, PredictTuneConfig
+from aitrader.ml.strategy_signals import blend_predicted_return
 from aitrader.nlp.cluster import _article_text, _sector_return_profiles
 from aitrader.nlp.keyword_cache import keywords_for_article, load_keyword_cache
 from aitrader.nlp.keywords import (
@@ -47,7 +50,7 @@ BACKTEST_SIGNAL_MAX_ARTICLES = 100
 
 @dataclass
 class BacktestFeatureCache:
-    """Expensive PIT features built once; RSI scores many configs from this cache."""
+    """Expensive PIT features built once; predict tune scores many configs from this cache."""
 
     run_dir: Path
     horizon_days: int
@@ -351,6 +354,7 @@ def _build_monthly_spy_features(
     news_window_days: int = 30,
     min_train_months: int = 12,
     max_months: int = 48,
+    through_date: pd.Timestamp | None = None,
     pipeline: str = "predict.backtest",
     quiet: bool = False,
 ) -> tuple[pd.Series, list[dict[str, Any]], list[float | None]] | None:
@@ -361,9 +365,14 @@ def _build_monthly_spy_features(
     timeline = _corpus_timeline(corpus)
     cluster_model = _load_cluster_model(run_dir)
     coef_map = _keyword_coef_map(load_keyword_map(run_dir, "anchor"))
-    month_ends = (
-        spy.index.to_series().groupby(spy.index.to_period("M")).max().sort_values().tail(max_months)
-    )
+    try:
+        cot_frame = ensure_cot_data(run_dir)
+    except (OSError, RuntimeError, urllib.error.URLError):
+        cot_frame = None
+    month_ends_all = spy.index.to_series().groupby(spy.index.to_period("M")).max().sort_values()
+    if through_date is not None:
+        month_ends_all = month_ends_all[month_ends_all <= pd.Timestamp(through_date)]
+    month_ends = month_ends_all.tail(max_months)
     month_features: list[dict[str, Any]] = []
     month_realized: list[float | None] = []
     feat_prog = RunProgress(
@@ -407,12 +416,14 @@ def _build_monthly_spy_features(
             text = f"{art.get('title', '')} {art.get('body', '')}"
             events.extend(_macro_events(keywords_for_article(art, llm_cache) or []))
             events.extend(_macro_events_from_text(text))
+        cot_sig = cot_signal_at(cot_frame, as_of) if cot_frame is not None else 0.0
         month_features.append(
             {
                 "keyword_score": kw_score,
                 "sentiment": sentiment,
                 "cluster_prior": _anchor_cluster_prior(profile),
                 "momentum": _momentum_at(spy, as_of),
+                "cot_signal": cot_sig,
                 "beta_spy": 1.0,
                 "cluster_id": dom,
                 "news_articles": len(window),
@@ -479,7 +490,7 @@ def _score_monthly_spy_from_features(
         hm = _train_horizon_model(train_df, "1m", horizon_days)
         feat = month_features[i]
         mom = feat["momentum"]
-        pred, lo, hi, cold, conf = _predict_from_features(
+        ridge_pred, lo, hi, cold, conf = _predict_from_features(
             hm,
             {
                 "keyword_score": feat["keyword_score"],
@@ -493,6 +504,15 @@ def _score_monthly_spy_from_features(
             news_articles=int(feat.get("news_articles", 0)),
             macro_events=str(feat.get("macro_events", "none")),
         )
+        cot_sig = float(feat.get("cot_signal", 0) or 0)
+        pred = blend_predicted_return(
+            ridge_pred,
+            sentiment=float(feat.get("sentiment", 0) or 0),
+            momentum=mom,
+            cot_signal=cot_sig,
+            news_articles=int(feat.get("news_articles", 0)),
+            config=cfg,
+        )
         rows.append(
             {
                 "trading_day": month_ends.iloc[i],
@@ -500,6 +520,7 @@ def _score_monthly_spy_from_features(
                 "sector_id": "anchor",
                 "horizon": "1m",
                 "predicted_return": pred,
+                "ridge_predicted_return": ridge_pred,
                 "realized_return": month_realized[i],
                 "confidence_lower": lo,
                 "confidence_upper": hi,
@@ -507,6 +528,8 @@ def _score_monthly_spy_from_features(
                 "cluster_id": feat["cluster_id"],
                 "keyword_score": feat["keyword_score"],
                 "sentiment": feat["sentiment"],
+                "momentum": mom,
+                "cot_signal": cot_sig,
                 "news_articles": feat["news_articles"],
                 "macro_events": feat["macro_events"],
                 "top_keywords": feat["top_keywords"],
@@ -525,6 +548,7 @@ def _build_macro_event_features(
     llm_cache: dict[str, dict[str, Any]] | None,
     pipeline: str = "predict.backtest",
     quiet: bool = False,
+    max_trading_days: int | None = None,
 ) -> list[dict[str, Any]]:
     corpus = load_corpus(run_dir)
     macro_arts = [a for a in corpus if (a.get("sector_id") or "") == "macro"]
@@ -540,6 +564,8 @@ def _build_macro_event_features(
     timeline = _corpus_timeline(corpus)
     feature_rows: list[dict[str, Any]] = []
     trading_days = sorted(by_day.keys())
+    if max_trading_days is not None and max_trading_days > 0:
+        trading_days = trading_days[:max_trading_days]
     prog = RunProgress(
         "backtest-macro-events",
         len(trading_days),
@@ -658,6 +684,7 @@ def build_backtest_feature_cache(
     news_window_days: int = 30,
     min_train_months: int = 12,
     max_months: int = 48,
+    through_date: pd.Timestamp | None = None,
     pipeline: str = "predict.backtest",
     quiet: bool = False,
 ) -> BacktestFeatureCache | None:
@@ -668,6 +695,7 @@ def build_backtest_feature_cache(
         news_window_days=news_window_days,
         min_train_months=min_train_months,
         max_months=max_months,
+        through_date=through_date,
         pipeline=pipeline,
         quiet=quiet,
     )
@@ -843,9 +871,22 @@ def run_prediction_backtest(
     include_walk_forward: bool = False,
     max_corpus_for_walk_forward: int = 250,
     quiet: bool = False,
+    run_probe: bool = True,
 ) -> tuple[Path, Path]:
     root = ensure_run_layout(run_dir)
     today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    if run_probe:
+        from aitrader.agent_rsi import probe_backtest_performance
+
+        probe = probe_backtest_performance(
+            root,
+            news_window_days=max(news_window_days, 30),
+            quiet=quiet,
+        )
+        if not probe.get("passes_gate"):
+            raise RuntimeError(
+                "Backtest blocked: perf probe failed — fix hot path (see agent_rsi/) before full run"
+            )
     if not quiet:
         write_status(
             root,

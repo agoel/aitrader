@@ -64,13 +64,30 @@ def _forward_fill_single_gaps(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
-def fetch_ohlcv(ticker: str, years: float = 5, interval: str = "1d") -> pd.DataFrame:
-    end = datetime.now(timezone.utc)
-    start = end - timedelta(days=int(years * 365.25))
+def fetch_ohlcv(
+    ticker: str,
+    years: float = 5,
+    interval: str = "1d",
+    *,
+    start: str | datetime | None = None,
+    end: str | datetime | None = None,
+) -> pd.DataFrame:
+    if end is None:
+        end_dt = datetime.now(timezone.utc)
+    elif isinstance(end, str):
+        end_dt = datetime.fromisoformat(end.replace("Z", "+00:00"))
+    else:
+        end_dt = end
+    if start is None:
+        start_dt = end_dt - timedelta(days=int(years * 365.25))
+    elif isinstance(start, str):
+        start_dt = datetime.fromisoformat(start.replace("Z", "+00:00"))
+    else:
+        start_dt = start
     raw = yf.download(
         ticker,
-        start=start.strftime("%Y-%m-%d"),
-        end=end.strftime("%Y-%m-%d"),
+        start=start_dt.strftime("%Y-%m-%d"),
+        end=end_dt.strftime("%Y-%m-%d"),
         interval=interval,
         auto_adjust=False,
         progress=False,

@@ -5,7 +5,16 @@ from aitrader.workspace import ensure_run_layout, update_meta
 
 def test_ensure_run_layout(tmp_path: Path) -> None:
     root = ensure_run_layout(tmp_path)
-    for sub in ("config", "data", "data/ohlcv", "models", "reports", "rsi"):
+    for sub in (
+        "config",
+        "data",
+        "data/ohlcv",
+        "models",
+        "reports",
+        "agent_rsi",
+        "learning",
+        "rsi",
+    ):
         assert (root / sub).is_dir()
 
 
