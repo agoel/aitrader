@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import json
 import math
+import os
 import pickle
+from concurrent.futures import ProcessPoolExecutor, as_completed
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -17,14 +19,17 @@ from sklearn.linear_model import Ridge
 
 from aitrader.ml.drift import filter_corpus_by_age, load_keyword_map
 from aitrader.nlp.keyword_cache import keywords_for_article, load_keyword_cache
+from aitrader.nlp.keyword_tiers import load_tier_coef_maps, signal_tiered_from_articles
+from aitrader.nlp.stoplist import filter_coef_map
 from aitrader.nlp.keywords import (
     HORIZON_TRADING_DAYS,
     _labels_from_corpus,
-    _vader_sentiment,
     forward_return_at,
     load_etf_closes,
     load_sector_etfs,
+    sample_corpus_for_training,
 )
+from aitrader.nlp.sentiment import SentimentScorer, get_sentiment_scorer, resolve_backend
 from aitrader.nlp.news import load_corpus
 from aitrader.ml.predict_config import DEFAULT_CONFIG, PredictTuneConfig, load_predict_config
 from aitrader.workspace import ensure_run_layout, update_meta
@@ -34,6 +39,9 @@ DEFAULT_HORIZONS = ("2w", "1m", "3m")
 FEATURE_COLS = ("keyword_score", "sentiment", "cluster_prior", "momentum", "beta_spy")
 MIN_TRAIN_ROWS = 20
 CONFIDENCE_Z = 1.96
+DEFAULT_TRAIN_MAX_ARTICLES = 8000
+DEFAULT_TRAIN_WORKERS = min(4, os.cpu_count() or 1)
+FEATURE_ROW_PROGRESS_EVERY = 5000
 
 
 @dataclass
@@ -62,7 +70,8 @@ def load_current_cluster(run_dir: Path) -> dict[str, Any]:
 
 
 def _keyword_coef_map(keyword_map: list[dict[str, Any]]) -> dict[str, float]:
-    return {str(r["keyword"]).lower(): float(r.get("coef", 0.0)) for r in keyword_map}
+    raw = {str(r["keyword"]).lower(): float(r.get("coef", 0.0)) for r in keyword_map}
+    return filter_coef_map(raw)
 
 
 def _articles_for_ticker(
@@ -91,18 +100,20 @@ def _signal_from_articles(
     llm_cache: dict[str, dict[str, Any]] | None,
     *,
     max_articles: int | None = None,
-) -> tuple[float, float, list[str]]:
+    run_dir: str | Path | None = None,
+    scorer: SentimentScorer | None = None,
+) -> tuple[float, float, list[str], float]:
     if max_articles and len(articles) > max_articles:
         articles = sorted(articles, key=lambda a: a.get("published_at", ""))[-max_articles:]
+    sent = scorer or get_sentiment_scorer(run_dir)
     score = 0.0
-    sentiments: list[float] = []
     contrib: list[tuple[str, float]] = []
+    scored_arts: list[dict[str, Any]] = []
     for art in articles:
-        text = f"{art.get('title', '')} {art.get('body', '')}"
         kws = keywords_for_article(art, llm_cache)
         if not kws:
             continue
-        sentiments.append(_vader_sentiment(text))
+        scored_arts.append(art)
         for kw in kws:
             coef = coef_map.get(kw.lower())
             if coef is None:
@@ -111,8 +122,12 @@ def _signal_from_articles(
             contrib.append((kw, coef))
     contrib.sort(key=lambda x: abs(x[1]), reverse=True)
     top = [k for k, _ in contrib[:5]]
-    mean_sent = sum(sentiments) / len(sentiments) if sentiments else 0.0
-    return score, mean_sent, top
+    mean_sent, vader_mean = sent.mean_for_articles(
+        scored_arts,
+        llm_cache,
+        require_keywords=False,
+    )
+    return score, mean_sent, top, vader_mean
 
 
 def _cluster_prior(sector_id: str, cluster_doc: dict[str, Any]) -> float:
@@ -173,47 +188,177 @@ def _feature_row(
     return np.array([[keyword_score, sentiment, cluster_prior, momentum, beta_spy]])
 
 
+def _preload_sentiments(
+    corpus: list[dict[str, Any]],
+    scorer: SentimentScorer,
+) -> dict[str, float]:
+    """Score each article once; reused across all sector passes."""
+    out: dict[str, float] = {}
+    for row in corpus:
+        art_id = str(row.get("id") or "")
+        if not art_id or art_id in out:
+            continue
+        primary, _ = scorer.score_article(row)
+        out[art_id] = primary
+    return out
+
+
+def _sector_training_rows(
+    sector_id: str,
+    etf: str,
+    corpus: list[dict[str, Any]],
+    horizon_days: int,
+    run_dir: Path,
+    *,
+    llm_cache: dict[str, dict[str, Any]] | None,
+    spy_closes: pd.Series,
+    ticker_closes: pd.Series,
+    sentiment_by_id: dict[str, float] | None,
+    quiet: bool,
+) -> list[dict[str, Any]]:
+    if not quiet:
+        print(f"  training labels: sector {sector_id} ({etf})…", flush=True)
+    labels = _labels_from_corpus(
+        corpus,
+        sector_id,
+        run_dir,
+        etf,
+        horizon_days,
+        include_macro=True,
+        llm_cache=llm_cache,
+        use_llm=True,
+        sentiment_by_id=sentiment_by_id,
+    )
+    coef_map = _keyword_coef_map(load_keyword_map(run_dir, sector_id))
+    rows: list[dict[str, Any]] = []
+    n_labels = len(labels)
+    for i, label in enumerate(labels):
+        if not quiet and i > 0 and i % FEATURE_ROW_PROGRESS_EVERY == 0:
+            print(
+                f"    {sector_id}: {i}/{n_labels} feature rows…",
+                flush=True,
+            )
+        kw_score = sum(coef_map.get(k.lower(), 0.0) for k in label.keywords)
+        mom = _momentum_at(ticker_closes, label.trading_day)
+        beta = _beta_at(ticker_closes, spy_closes, label.trading_day)
+        rows.append(
+            {
+                "sector_id": sector_id,
+                "trading_day": label.trading_day,
+                "keyword_score": kw_score,
+                "sentiment": label.sentiment,
+                "cluster_prior": 0.0,
+                "momentum": mom,
+                "beta_spy": beta,
+                "forward_return": label.forward_return,
+            }
+        )
+    if not quiet and n_labels > 0:
+        print(f"    {sector_id}: {n_labels}/{n_labels} feature rows", flush=True)
+    return rows
+
+
+def _sector_training_rows_worker(
+    payload: tuple[
+        str,
+        str,
+        list[dict[str, Any]],
+        int,
+        str,
+        dict[str, float] | None,
+        bool,
+    ],
+) -> list[dict[str, Any]]:
+    sector_id, etf, corpus, horizon_days, run_dir_str, sentiment_by_id, quiet = payload
+    run_dir = Path(run_dir_str)
+    llm_cache = load_keyword_cache(run_dir)
+    spy_closes = load_etf_closes(run_dir, "SPY")
+    ticker_closes = load_etf_closes(run_dir, etf)
+    return _sector_training_rows(
+        sector_id,
+        etf,
+        corpus,
+        horizon_days,
+        run_dir,
+        llm_cache=llm_cache,
+        spy_closes=spy_closes,
+        ticker_closes=ticker_closes,
+        sentiment_by_id=sentiment_by_id,
+        quiet=quiet,
+    )
+
+
 def _build_training_frame(
     run_dir: Path,
     horizon_days: int,
     *,
     llm_cache: dict[str, dict[str, Any]] | None,
+    quiet: bool = False,
+    max_train_articles: int = DEFAULT_TRAIN_MAX_ARTICLES,
+    workers: int = DEFAULT_TRAIN_WORKERS,
 ) -> pd.DataFrame:
-    corpus = load_corpus(run_dir)
+    full_corpus = load_corpus(run_dir)
+    corpus = sample_corpus_for_training(full_corpus, max_articles=max_train_articles)
+    if not quiet and len(corpus) < len(full_corpus):
+        print(
+            f"  training corpus: {len(corpus)} articles "
+            f"(sampled from {len(full_corpus)})",
+            flush=True,
+        )
     sector_etfs = load_sector_etfs(run_dir)
     sector_etfs["anchor"] = "SPY"
     spy_closes = load_etf_closes(run_dir, "SPY")
-    rows: list[dict[str, Any]] = []
 
-    for sector_id, etf in sector_etfs.items():
-        labels = _labels_from_corpus(
-            corpus,
-            sector_id,
-            run_dir,
-            etf,
-            horizon_days,
-            include_macro=True,
-            llm_cache=llm_cache,
-            use_llm=True,
-        )
-        coef_map = _keyword_coef_map(load_keyword_map(run_dir, sector_id))
-        for label in labels:
-            kw_score = sum(coef_map.get(k.lower(), 0.0) for k in label.keywords)
-            ticker_closes = load_etf_closes(run_dir, etf)
-            mom = _momentum_at(ticker_closes, label.trading_day)
-            beta = _beta_at(ticker_closes, spy_closes, label.trading_day)
-            rows.append(
-                {
-                    "sector_id": sector_id,
-                    "trading_day": label.trading_day,
-                    "keyword_score": kw_score,
-                    "sentiment": label.sentiment,
-                    "cluster_prior": 0.0,
-                    "momentum": mom,
-                    "beta_spy": beta,
-                    "forward_return": label.forward_return,
-                }
+    sentiment_by_id: dict[str, float] | None = None
+    if resolve_backend(run_dir) in ("finbert", "blend"):
+        scorer = get_sentiment_scorer(run_dir)
+        if not quiet:
+            print(f"  preloading FinBERT sentiments for {len(corpus)} articles…", flush=True)
+        sentiment_by_id = _preload_sentiments(corpus, scorer)
+        scorer.flush_cache()
+
+    sector_items = list(sector_etfs.items())
+    rows: list[dict[str, Any]] = []
+    n_workers = max(1, min(workers, len(sector_items)))
+
+    if n_workers == 1:
+        closes_cache: dict[str, pd.Series] = {"SPY": spy_closes}
+        for sector_id, etf in sector_items:
+            if etf not in closes_cache:
+                closes_cache[etf] = load_etf_closes(run_dir, etf)
+            rows.extend(
+                _sector_training_rows(
+                    sector_id,
+                    etf,
+                    corpus,
+                    horizon_days,
+                    run_dir,
+                    llm_cache=llm_cache,
+                    spy_closes=spy_closes,
+                    ticker_closes=closes_cache[etf],
+                    sentiment_by_id=sentiment_by_id,
+                    quiet=quiet,
+                )
             )
+    else:
+        if not quiet:
+            print(f"  parallel sectors: {n_workers} workers", flush=True)
+        payloads = [
+            (
+                sector_id,
+                etf,
+                corpus,
+                horizon_days,
+                str(run_dir.resolve()),
+                sentiment_by_id,
+                quiet,
+            )
+            for sector_id, etf in sector_items
+        ]
+        with ProcessPoolExecutor(max_workers=n_workers) as pool:
+            futures = [pool.submit(_sector_training_rows_worker, p) for p in payloads]
+            for fut in as_completed(futures):
+                rows.extend(fut.result())
     return pd.DataFrame(rows)
 
 
@@ -312,7 +457,8 @@ def _predict_from_features(
     else:
         expected = max(-cap, min(cap, expected))
 
-    half = model.residual_std * CONFIDENCE_Z
+    z = cfg.confidence_z if cfg.confidence_z > 0 else CONFIDENCE_Z
+    half = model.residual_std * z
     if not has_news:
         half *= 4.0
     elif boost > 1.0:
@@ -350,15 +496,27 @@ def train_horizon_models(
     run_dir: str | Path,
     *,
     horizons: tuple[str, ...] = DEFAULT_HORIZONS,
+    max_train_articles: int = DEFAULT_TRAIN_MAX_ARTICLES,
+    workers: int = DEFAULT_TRAIN_WORKERS,
 ) -> dict[str, _HorizonModel]:
     root = ensure_run_layout(run_dir)
+    if workers <= 0:
+        workers = DEFAULT_TRAIN_WORKERS
     llm_cache = load_keyword_cache(root)
     models: dict[str, _HorizonModel] = {}
     models_dir = root / "models"
     models_dir.mkdir(parents=True, exist_ok=True)
     for horizon in horizons:
         days = HORIZON_TRADING_DAYS.get(horizon, 21)
-        frame = _build_training_frame(root, days, llm_cache=llm_cache)
+        print(f"Building training frame for {horizon}…", flush=True)
+        frame = _build_training_frame(
+            root,
+            days,
+            llm_cache=llm_cache,
+            max_train_articles=max_train_articles,
+            workers=workers,
+        )
+        print(f"  {horizon}: {len(frame)} rows", flush=True)
         hm = _train_horizon_model(frame, horizon, days)
         models[horizon] = hm
         path = models_dir / f"predictor_{horizon}.pkl"
@@ -413,15 +571,24 @@ def run_predictions(
         ticker_closes = load_etf_closes(root, ticker)
         if ticker_closes.empty or as_of is None:
             continue
-        kw_map = load_keyword_map(root, sector_id if sector_id != "anchor" else "anchor")
-        coef_map = _keyword_coef_map(kw_map)
         articles = _articles_for_ticker(
             corpus,
             sector_id=sector_id,
             ticker=ticker,
             window_days=news_window_days,
         )
-        kw_score, sentiment, top_kw = _signal_from_articles(articles, coef_map, llm_cache)
+        tier_maps = load_tier_coef_maps(root)
+        if tier_maps.get("market") and sector_id == "anchor":
+            tier_scores, sentiment, top_kw, _ = signal_tiered_from_articles(
+                articles, tier_maps, llm_cache, sector_id=sector_id, run_dir=root
+            )
+            kw_score = tier_scores.market
+        else:
+            kw_map = load_keyword_map(root, sector_id if sector_id != "anchor" else "anchor")
+            coef_map = _keyword_coef_map(kw_map)
+            kw_score, sentiment, top_kw, _ = _signal_from_articles(
+                articles, coef_map, llm_cache, run_dir=root
+            )
         prior = _cluster_prior(sector_id, cluster_doc)
         mom = _momentum_at(ticker_closes, as_of)
         beta = _beta_at(ticker_closes, spy_closes, as_of)

@@ -18,7 +18,12 @@ from aitrader.nlp.keyword_cache import keywords_for_article, load_keyword_cache 
 from aitrader.nlp.news import ingest_news, load_corpus
 from aitrader.nlp.parallel import default_workers, parallel_map
 from aitrader.progress import RunProgress, parallel_map_progress
+from aitrader.nlp.stoplist import is_stoplisted
 from aitrader.workspace import ensure_run_layout
+
+# Phase 1 discover defaults (tighter than Phase 0 min_support=3 / min_ic=0.03)
+DEFAULT_MIN_SUPPORT = 5
+DEFAULT_MIN_KEYWORD_IC = 0.04
 
 HORIZON_TRADING_DAYS = {"2w": 10, "1m": 21, "3m": 63}
 
@@ -59,12 +64,9 @@ def extract_keywords(title: str, body: str) -> list[str]:
 
 
 def _vader_sentiment(text: str) -> float:
-    try:
-        from vaderSentiment.vaderSentiment import SentimentIntensityAnalyzer
+    from aitrader.nlp.sentiment import vader_score
 
-        return SentimentIntensityAnalyzer().polarity_scores(text)["compound"]
-    except Exception:
-        return 0.0
+    return vader_score(text)
 
 
 def _pearson_ic(x: list[float], y: list[float]) -> float:
@@ -177,6 +179,9 @@ def _labels_from_corpus(
     include_macro: bool = True,
     llm_cache: dict[str, dict[str, Any]] | None = None,
     use_llm: bool = True,
+    sentiment_run_dir: Path | None = None,
+    sentiment_scorer: Any | None = None,
+    sentiment_by_id: dict[str, float] | None = None,
 ) -> list[_ArticleLabel]:
     """Label articles with per-ticker returns when available (cross-sectional variance)."""
     labels: list[_ArticleLabel] = []
@@ -208,7 +213,18 @@ def _labels_from_corpus(
         kws = _article_keywords(row, llm_cache, use_llm=use_llm)
         if not kws:
             continue
-        sentiment = _vader_sentiment(f"{row.get('title','')} {row.get('body','')}")
+        if sentiment_by_id is not None:
+            sentiment = sentiment_by_id.get(str(row.get("id") or ""), 0.0)
+        elif sentiment_scorer is not None:
+            primary, _ = sentiment_scorer.score_article(row)
+            sentiment = primary
+        elif sentiment_run_dir is not None:
+            from aitrader.nlp.sentiment import get_sentiment_scorer
+
+            primary, _ = get_sentiment_scorer(sentiment_run_dir).score_article(row)
+            sentiment = primary
+        else:
+            sentiment = _vader_sentiment(f"{row.get('title','')} {row.get('body','')}")
         for ticker in price_tickers:
             closes = _closes_for(ticker)
             trading_day = _map_to_trading_day(pub, closes.index)
@@ -229,6 +245,20 @@ def _labels_from_corpus(
             )
             break
     return labels
+
+
+def sample_corpus_for_training(
+    corpus: list[dict[str, Any]],
+    *,
+    lookback_years: int = 5,
+    max_articles: int = 8000,
+) -> list[dict[str, Any]]:
+    """Cap training corpus size; ``max_articles <= 0`` keeps the full corpus."""
+    if max_articles <= 0:
+        return corpus
+    return _sample_corpus_for_discover(
+        corpus, lookback_years=lookback_years, max_articles=max_articles
+    )
 
 
 def _sample_corpus_for_discover(
@@ -271,12 +301,14 @@ def _score_keywords_from_labels(
     kw_to_present: dict[str, list[float]] = {}
     for a in labels:
         for kw in a.keywords:
+            if is_stoplisted(kw):
+                continue
             kw_to_present.setdefault(kw, []).append(a.forward_return)
 
     candidates = [
         (kw, rets)
         for kw, rets in kw_to_present.items()
-        if len(rets) >= min_support
+        if len(rets) >= min_support and not is_stoplisted(kw)
     ]
     candidates.sort(key=lambda x: len(x[1]), reverse=True)
     candidates = candidates[:max_keywords_to_score]
@@ -377,11 +409,11 @@ def _discover_one_sector(
         max_keywords=max_keywords_per_sector,
         today=today,
     )
-    if len(keyword_stats) < 5 and min_keyword_ic >= 0.03:
+    if not keyword_stats and min_support > 4:
         keyword_stats = _score_keywords_from_labels(
             labels,
-            min_support=max(2, min_support - 1),
-            min_keyword_ic=min_keyword_ic * 0.5,
+            min_support=4,
+            min_keyword_ic=max(0.035, min_keyword_ic * 0.875),
             max_keywords=max_keywords_per_sector,
             today=today,
         )
@@ -394,9 +426,9 @@ def discover_sector_keywords(
     run_dir: str | Path,
     *,
     label_horizon: str = "1m",
-    min_keyword_ic: float = 0.03,
+    min_keyword_ic: float = DEFAULT_MIN_KEYWORD_IC,
     max_keywords_per_sector: int = 50,
-    min_support: int = 3,
+    min_support: int = DEFAULT_MIN_SUPPORT,
     enrich_yahoo: bool = True,
     use_llm: bool = True,
     max_labels_per_sector: int = 4000,

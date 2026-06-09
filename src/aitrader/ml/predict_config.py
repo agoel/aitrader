@@ -38,6 +38,8 @@ class PredictTuneConfig:
     combo_mode: str = "and"  # and | vote
     min_votes: int = 2
     score_threshold: float = 0.45
+    # Half-width of return band = residual_std * confidence_z (1.96 ≈ 95% naive normal)
+    confidence_z: float = 1.96
 
     def scaled_keyword(self, score: float) -> float:
         return score * self.keyword_scale

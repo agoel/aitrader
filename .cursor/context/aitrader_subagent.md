@@ -208,7 +208,7 @@ Cite **lsai_subagents.md** § **Recipe — Self-learning (domain objective)**. C
 ### Expert pushback
 
 - **Stop** if `{capital_usd}` unset — allocations are meaningless without budget.
-- **Stop** if user requests live Schwab orders before paper/backtest validation — default to recommendation-only.
+- **Stop** if user requests live Schwab orders — **never** implement order placement; quotes and advice only.
 - **Default** `IWM` over `RUT` for Yahoo OHLCV unless Schwab index feed is configured.
 - **Push back** on `universe_mode=full` before L6 ships — start with sector mode.
 
@@ -309,7 +309,9 @@ Cite **lsai_subagents.md** § **Recipe — Self-learning (domain objective)**. C
 
 ## Recipe — Charles Schwab API setup and connector
 
-**Purpose:** Register Schwab developer app, obtain OAuth tokens, and ingest quotes/OHLCV when Yahoo is insufficient or live data is required.
+**Purpose:** Register Schwab developer app, obtain OAuth tokens, and fetch **quotes / option chains only** when Yahoo is insufficient or live CSP pricing is required.
+
+**Hard policy (mandatory):** **Market Data API only — no orders, ever.** Agents and code in this repo must **not** place, modify, or cancel trades via Schwab (or any broker). Use Schwab for live quotes and option-chain marks; the user executes trades manually. Do **not** register or wire **Accounts & Trading** API for agent use. Enforced in `src/aitrader/data/schwab.py` (`assert_quotes_only_url`).
 
 ### Formal parameters
 
@@ -323,7 +325,7 @@ Cite **lsai_subagents.md** § **Recipe — Self-learning (domain objective)**. C
 ### Run — Portal setup (one-time, user-guided)
 
 1. Open [Schwab Developer Portal](https://developer.schwab.com/) → **Create App**.
-2. Set **API Product** to **Market Data** (and **Accounts & Trading** only if execution is in scope later).
+2. Set **API Product** to **Market Data only** — do **not** enable Accounts & Trading for this project (no agent order placement).
 3. Set **Callback URL** to `{redirect_uri}` (HTTPS required; local callback via Schwab's documented loopback).
 4. Copy **App Key** and **App Secret** into environment (not repo):
    ```bash

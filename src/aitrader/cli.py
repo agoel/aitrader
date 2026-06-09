@@ -9,6 +9,12 @@ from pathlib import Path
 from aitrader.data.yahoo import ingest_universe
 from aitrader.ml.drift import run_drift_detection
 from aitrader.ml.backtest import run_prediction_backtest
+from aitrader.ml.csp_spread_advisor import (
+    CSPSpreadParams,
+    advise_next_cycle,
+    backtest_csp_spreads,
+    backtest_csp_spreads_spx_schwab,
+)
 from aitrader.ml.option_range_study import run_option_range_study
 from aitrader.ml.portfolio_backtest import compare_portfolio_schedules, run_spy_portfolio_backtest
 from aitrader.ml.learn_predict import run_prediction_tune
@@ -241,11 +247,66 @@ def _cmd_keywords_extract_openai(args: argparse.Namespace) -> None:
     print(f"Wrote {count} rows to {path}")
 
 
+def _cmd_keywords_audit(args: argparse.Namespace) -> None:
+    from aitrader.nlp.phase0_suite import run_keyword_audit
+
+    audit = run_keyword_audit(args.run_dir)
+    print(json.dumps(audit, indent=2))
+
+
+def _cmd_keywords_benchmark_sentiment(args: argparse.Namespace) -> None:
+    from aitrader.nlp.phase0_suite import run_benchmark_sentiment
+
+    skip_fb = not getattr(args, "with_finbert", False)
+    _, summary, csv_path = run_benchmark_sentiment(
+        args.run_dir,
+        max_months=args.max_months,
+        skip_finbert=skip_fb,
+    )
+    print(f"Wrote {csv_path}")
+    for r in summary.get("results", []):
+        print(f"  {r['signal']:32s} IC={r['ic']:+.4f}  hit={r['hit_rate']:.3f}")
+
+
+def _cmd_keywords_phase0_close(args: argparse.Namespace) -> None:
+    from aitrader.nlp.phase0_suite import run_phase0_close
+
+    skip_fb = not getattr(args, "with_finbert", False)
+    report = run_phase0_close(
+        args.run_dir,
+        max_months=args.max_months,
+        news_window_days=args.window_days,
+        skip_backtest=args.skip_backtest,
+        skip_finbert=skip_fb,
+        quiet=args.quiet,
+    )
+    print(f"Wrote {report}")
+
+
+def _cmd_keywords_discover_tiered(args: argparse.Namespace) -> None:
+    from aitrader.nlp.keyword_tiers import discover_tiered_keywords, tier_overlap_stats
+
+    paths, report = discover_tiered_keywords(
+        args.run_dir,
+        label_horizon=args.horizon,
+        min_keyword_ic=args.min_ic,
+        min_support=args.min_support,
+        use_llm=not args.no_llm,
+        workers=getattr(args, "workers", None),
+        quiet=args.quiet,
+    )
+    stats = tier_overlap_stats(Path(args.run_dir).expanduser())
+    print(f"Wrote {len(paths)} tier maps")
+    print(f"Wrote {report}")
+    print(json.dumps(stats, indent=2))
+
+
 def _cmd_keywords_discover(args: argparse.Namespace) -> None:
     paths, report = discover_sector_keywords(
         args.run_dir,
         label_horizon=args.horizon,
         min_keyword_ic=args.min_ic,
+        min_support=args.min_support,
         use_llm=not args.no_llm,
         workers=getattr(args, "workers", None),
         quiet=args.quiet,
@@ -278,6 +339,7 @@ def _cmd_cluster_fit(args: argparse.Namespace) -> None:
 
 
 def _cmd_predict_run(args: argparse.Namespace) -> None:
+    _maybe_set_sentiment_backend(args)
     path = run_predictions(
         args.run_dir,
         horizons=tuple(args.horizons.split(",")),
@@ -287,7 +349,25 @@ def _cmd_predict_run(args: argparse.Namespace) -> None:
     print(f"Wrote {path}")
 
 
+def _maybe_set_sentiment_backend(args: argparse.Namespace) -> None:
+    backend = getattr(args, "sentiment", None)
+    if backend:
+        from aitrader.nlp.sentiment import set_sentiment_backend
+
+        set_sentiment_backend(args.run_dir, backend)
+
+
+def _add_sentiment(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--sentiment",
+        choices=("vader", "finbert", "blend"),
+        default=None,
+        help="Sentiment backend for Ridge features (persisted in meta.json)",
+    )
+
+
 def _cmd_predict_backtest(args: argparse.Namespace) -> None:
+    _maybe_set_sentiment_backend(args)
     csv_path, report = run_prediction_backtest(
         args.run_dir,
         horizons=tuple(args.horizons.split(",")),
@@ -300,6 +380,158 @@ def _cmd_predict_backtest(args: argparse.Namespace) -> None:
     )
     print(f"Wrote {csv_path}")
     print(f"Wrote {report}")
+
+
+def _cmd_keywords_proxy_benchmark(args: argparse.Namespace) -> None:
+    from aitrader.ml.sentiment_proxy_benchmark import run_proxy_benchmark, write_proxy_report
+
+    df, summary = run_proxy_benchmark(
+        args.run_dir,
+        max_months=args.max_months,
+        use_finbert=not args.skip_finbert,
+    )
+    report = write_proxy_report(args.run_dir, df, summary)
+    print(f"Wrote {report}")
+    for r in summary["results"]:
+        print(f"  {r['signal']:32s} IC={r['ic']:+.4f}  hit={r['hit_rate']:.3f}")
+    print(f"Recommendation: {summary['decision']['recommendation']}")
+
+
+def _cmd_csp_spread(args: argparse.Namespace) -> None:
+    params = CSPSpreadParams(
+        target_delta=args.target_delta,
+        spreads=args.spreads,
+        capital_usd=args.capital_usd,
+        target_credit_usd=args.target_credit,
+        safety_floor=args.safety_floor,
+        min_safe_prob=args.min_safe_prob,
+        entry_min_safe_prob=args.entry_min_safe_prob,
+        spread_width_points=args.spread_width_points,
+        target_credit_band=(args.credit_lo, args.credit_hi),
+        spx_short_strike=args.spx_short_strike,
+        spx_long_strike=args.spx_long_strike,
+    )
+    if args.schwab_backtest:
+        _df, summary, report = backtest_csp_spreads_spx_schwab(
+            args.run_dir,
+            params=params,
+            news_window_days=args.window_days,
+            lookback_years=args.years,
+            token_path=args.token_path,
+        )
+        print(f"Wrote {report}")
+        print(
+            f"SPX Schwab backtest: traded {summary['months_traded']} mo | "
+            f"assigned {summary['assignment_rate_pct']}% | "
+            f"P&L ${summary['total_pnl_usd']:,.0f} | "
+            f"CAGR {summary['cagr_pct']}%"
+        )
+        return
+    if args.backtest:
+        _df, summary, report = backtest_csp_spreads(
+            args.run_dir,
+            params=params,
+            news_window_days=args.window_days,
+            lookback_years=args.years,
+        )
+        print(f"Wrote {report}")
+        print(
+            f"CSP backtest: traded {summary['months_traded']} mo | "
+            f"assigned {summary['assignment_rate_pct']}% | "
+            f"P&L ${summary['total_pnl_usd']:,.0f} | "
+            f"CAGR {summary['cagr_pct']}%"
+        )
+        return
+    schwab_client = None
+    if args.schwab:
+        from aitrader.data.schwab import SchwabClient
+
+        schwab_client = SchwabClient.from_token_path(args.token_path)
+    advices, report = advise_next_cycle(
+        args.run_dir,
+        expiry_year=args.expiry_year,
+        expiry_month=args.expiry_month,
+        params=params,
+        news_window_days=args.window_days,
+        schwab_client=schwab_client,
+    )
+    print(f"Wrote {report}")
+    for a in advices:
+        extra = ""
+        if a.schwab_credit_mid is not None:
+            extra = (
+                f" schwab=${a.schwab_credit_mid:.2f}/sp "
+                f"safe={100*a.safe_prob:.0f}%"
+            )
+        print(
+            f"  {a.index}: {a.action} safety={a.safety_score:.0f} "
+            f"short={a.short_strike_index:.0f} floor={a.model_floor_index:.0f} "
+            f"credit~${a.credit_usd_est:.0f}{extra}"
+        )
+
+
+def _cmd_data_schwab_auth(args: argparse.Namespace) -> None:
+    from aitrader.data.schwab import (
+        DEFAULT_TOKEN_PATH,
+        SchwabCredentials,
+        run_login_flow,
+        run_manual_flow,
+    )
+
+    creds = SchwabCredentials.from_env(redirect_uri=args.redirect_uri)
+    token_path = Path(args.token_path)
+    if args.manual:
+        run_manual_flow(creds, token_path)
+    else:
+        run_login_flow(creds, token_path)
+        print(f"Wrote tokens to {token_path}")
+
+
+def _cmd_data_schwab_quote(args: argparse.Namespace) -> None:
+    from aitrader.data.schwab import SchwabClient
+
+    client = SchwabClient.from_token_path(args.token_path)
+    print(json.dumps(client.quote(args.symbol), indent=2))
+
+
+def _cmd_data_schwab_chain(args: argparse.Namespace) -> None:
+    from datetime import date as date_cls
+
+    from aitrader.data.schwab import SchwabClient
+
+    client = SchwabClient.from_token_path(args.token_path)
+    fd = date_cls.fromisoformat(args.from_date) if args.from_date else None
+    td = date_cls.fromisoformat(args.to_date) if args.to_date else None
+    data = client.option_chain(
+        args.symbol,
+        contract_type=args.contract_type,
+        from_date=fd,
+        to_date=td,
+        strike_count=args.strike_count,
+    )
+    print(json.dumps(data, indent=2)[:6000])
+
+
+def _cmd_predict_calibrate_bands(args: argparse.Namespace) -> None:
+    from aitrader.ml.band_calibration import run_band_calibration
+
+    result, report = run_band_calibration(
+        args.run_dir,
+        target_coverage=args.target_coverage,
+        apply=args.apply,
+    )
+    c = result["calibrated"]
+    b = result["baseline"]
+    print(f"Wrote {report}")
+    print(
+        f"Baseline z=1.96: inside {b['inside_band_pct']}% width ${b['mean_band_width_usd']}"
+    )
+    print(
+        f"Calibrated z={c['confidence_z']}: inside {c['inside_band_pct']}% "
+        f"width ${c['mean_band_width_usd']} ({c['width_reduction_pct']}% narrower)"
+    )
+    if result["applied"]:
+        print(f"Updated {result['config_path']}")
 
 
 def _cmd_option_range_study(args: argparse.Namespace) -> None:
@@ -376,11 +608,18 @@ def _cmd_portfolio_backtest_spy(args: argparse.Namespace) -> None:
 
 
 def _cmd_predict_train(args: argparse.Namespace) -> None:
-    models = train_horizon_models(args.run_dir, horizons=tuple(args.horizons.split(",")))
+    _maybe_set_sentiment_backend(args)
+    models = train_horizon_models(
+        args.run_dir,
+        horizons=tuple(args.horizons.split(",")),
+        max_train_articles=args.max_train_articles,
+        workers=args.workers,
+    )
     print(f"Trained {len(models)} horizon models")
 
 
 def _cmd_predict_tune(args: argparse.Namespace) -> None:
+    _maybe_set_sentiment_backend(args)
     summary = run_prediction_tune(
         args.run_dir,
         max_rounds=args.max_rounds,
@@ -490,6 +729,9 @@ def _add_run_dir(parser: argparse.ArgumentParser) -> None:
 
 
 def main(argv: list[str] | None = None) -> None:
+    from aitrader.env import load_project_dotenv
+
+    load_project_dotenv()
     parser = argparse.ArgumentParser(prog="aitrader", description="Macro AI Trader CLI")
     sub = parser.add_subparsers(dest="command", required=True)
 
@@ -517,6 +759,33 @@ def main(argv: list[str] | None = None) -> None:
     _add_run_dir(cot_p)
     cot_p.add_argument("--years", type=float, default=6)
     cot_p.set_defaults(func=_cmd_data_cot)
+
+    schwab_p = data_sub.add_parser(
+        "schwab",
+        help="Schwab Market Data ONLY (quotes/chains — no orders, ever)",
+    )
+    schwab_sub = schwab_p.add_subparsers(dest="schwab_cmd", required=True)
+    from aitrader.data.schwab import DEFAULT_REDIRECT_URI, DEFAULT_TOKEN_PATH
+
+    schwab_auth = schwab_sub.add_parser("auth", help="OAuth login (writes token file)")
+    schwab_auth.add_argument("--redirect-uri", default=DEFAULT_REDIRECT_URI)
+    schwab_auth.add_argument("--token-path", default=str(DEFAULT_TOKEN_PATH))
+    schwab_auth.add_argument("--manual", action="store_true", help="Copy-paste redirect URL")
+    schwab_auth.set_defaults(func=_cmd_data_schwab_auth)
+
+    schwab_quote = schwab_sub.add_parser("quote", help="Live quote")
+    schwab_quote.add_argument("--symbol", default="SPY")
+    schwab_quote.add_argument("--token-path", default=str(DEFAULT_TOKEN_PATH))
+    schwab_quote.set_defaults(func=_cmd_data_schwab_quote)
+
+    schwab_chain = schwab_sub.add_parser("chain", help="Option chain snapshot")
+    schwab_chain.add_argument("--symbol", default="SPX")
+    schwab_chain.add_argument("--contract-type", default="PUT")
+    schwab_chain.add_argument("--from-date", default=None)
+    schwab_chain.add_argument("--to-date", default=None)
+    schwab_chain.add_argument("--strike-count", type=int, default=30)
+    schwab_chain.add_argument("--token-path", default=str(DEFAULT_TOKEN_PATH))
+    schwab_chain.set_defaults(func=_cmd_data_schwab_chain)
 
     l1_p = sub.add_parser("l1", help="Run L1 end-to-end (init + universe + yahoo)")
     _add_run_dir(l1_p)
@@ -597,7 +866,8 @@ def main(argv: list[str] | None = None) -> None:
     )
     run_p.set_defaults(fill=True)
     run_p.add_argument("--horizon", default="1m", choices=["2w", "1m", "3m"])
-    run_p.add_argument("--min-ic", type=float, default=0.03)
+    run_p.add_argument("--min-ic", type=float, default=0.04)
+    run_p.add_argument("--min-support", type=int, default=5)
     run_p.add_argument("--no-llm", action="store_true", help="Token fallback only at discover step")
     run_p.add_argument(
         "--workers",
@@ -638,10 +908,60 @@ def main(argv: list[str] | None = None) -> None:
     oai_p.add_argument("--force", action="store_true")
     oai_p.set_defaults(func=_cmd_keywords_extract_openai)
 
+    proxy_p = kw_sub.add_parser(
+        "proxy-benchmark",
+        help="Run A3/B2/D proxy IC tests before graph/adversarial work",
+    )
+    _add_run_dir(proxy_p)
+    proxy_p.add_argument("--max-months", type=int, default=46)
+    proxy_p.add_argument("--skip-finbert", action="store_true")
+    proxy_p.set_defaults(func=_cmd_keywords_proxy_benchmark)
+
+    audit_p = kw_sub.add_parser("audit", help="Audit keyword map quality (junk, macro pct)")
+    _add_run_dir(audit_p)
+    audit_p.set_defaults(func=_cmd_keywords_audit)
+
+    bench_p = kw_sub.add_parser(
+        "benchmark-sentiment",
+        help="46-month sentiment IC harness (Phase 0 suite)",
+    )
+    _add_run_dir(bench_p)
+    bench_p.add_argument("--max-months", type=int, default=46)
+    bench_p.add_argument("--skip-finbert", action="store_true")
+    bench_p.add_argument("--with-finbert", action="store_true")
+    bench_p.set_defaults(func=_cmd_keywords_benchmark_sentiment)
+
+    close_p = kw_sub.add_parser(
+        "phase0-close",
+        help="Close Phase 0: audit + benchmark + walk-forward guardrails",
+    )
+    _add_run_dir(close_p)
+    close_p.add_argument("--max-months", type=int, default=46)
+    close_p.add_argument("--window-days", type=int, default=30)
+    close_p.add_argument("--skip-backtest", action="store_true")
+    close_p.add_argument("--skip-finbert", action="store_true")
+    close_p.add_argument("--with-finbert", action="store_true")
+    _add_quiet(close_p)
+    close_p.set_defaults(func=_cmd_keywords_phase0_close)
+
+    tier_p = kw_sub.add_parser(
+        "discover-tiered",
+        help="Phase 2: market / sector / ticker keyword maps",
+    )
+    _add_run_dir(tier_p)
+    tier_p.add_argument("--horizon", default="1m", choices=["2w", "1m", "3m"])
+    tier_p.add_argument("--min-ic", type=float, default=0.04)
+    tier_p.add_argument("--min-support", type=int, default=5)
+    tier_p.add_argument("--no-llm", action="store_true")
+    tier_p.add_argument("--workers", type=int, default=None)
+    _add_quiet(tier_p)
+    tier_p.set_defaults(func=_cmd_keywords_discover_tiered)
+
     disc_p = kw_sub.add_parser("discover", help="Discover sentiment keywords per sector")
     _add_run_dir(disc_p)
     disc_p.add_argument("--horizon", default="1m", choices=["2w", "1m", "3m"])
-    disc_p.add_argument("--min-ic", type=float, default=0.03)
+    disc_p.add_argument("--min-ic", type=float, default=0.04)
+    disc_p.add_argument("--min-support", type=int, default=5)
     disc_p.add_argument(
         "--no-llm",
         action="store_true",
@@ -737,11 +1057,25 @@ def main(argv: list[str] | None = None) -> None:
     predict_run_p.add_argument("--horizons", default="2w,1m,3m")
     predict_run_p.add_argument("--window-days", type=int, default=7)
     predict_run_p.add_argument("--retrain", action="store_true", help="Force retrain horizon models")
+    _add_sentiment(predict_run_p)
     predict_run_p.set_defaults(func=_cmd_predict_run)
 
     predict_train_p = predict_sub.add_parser("train", help="Train per-horizon Ridge models only")
     _add_run_dir(predict_train_p)
     predict_train_p.add_argument("--horizons", default="2w,1m,3m")
+    predict_train_p.add_argument(
+        "--max-train-articles",
+        type=int,
+        default=8000,
+        help="Cap training corpus (0 = full corpus; default 8000)",
+    )
+    predict_train_p.add_argument(
+        "--workers",
+        type=int,
+        default=0,
+        help="Parallel sector workers (0 = auto, max 4)",
+    )
+    _add_sentiment(predict_train_p)
     predict_train_p.set_defaults(func=_cmd_predict_train)
 
     predict_bt_p = predict_sub.add_parser(
@@ -768,6 +1102,7 @@ def main(argv: list[str] | None = None) -> None:
         help="Skip agent RSI perf probe before full backtest",
     )
     _add_quiet(predict_bt_p)
+    _add_sentiment(predict_bt_p)
     predict_bt_p.set_defaults(func=_cmd_predict_backtest)
 
     predict_tune_p = predict_sub.add_parser(
@@ -794,6 +1129,7 @@ def main(argv: list[str] | None = None) -> None:
         default="composite",
         help="Config selection: profit=max $10K SPY sim, composite=balanced, ic=forecast IC",
     )
+    _add_sentiment(predict_tune_p)
     predict_tune_p.set_defaults(func=_cmd_predict_tune)
 
     predict_rsi_p = predict_sub.add_parser(
@@ -848,6 +1184,68 @@ def main(argv: list[str] | None = None) -> None:
         help="Evaluation end (YYYY-MM-DD), e.g. 2015-12-31",
     )
     predict_range_p.set_defaults(func=_cmd_option_range_study)
+
+    predict_cal_p = predict_sub.add_parser(
+        "calibrate-bands",
+        help="Calibrate confidence_z for tighter bands at a target coverage (from option-range CSV)",
+    )
+    _add_run_dir(predict_cal_p)
+    predict_cal_p.add_argument(
+        "--target-coverage",
+        type=float,
+        default=0.90,
+        help="Minimum inside-band fraction to preserve (default 0.90)",
+    )
+    predict_cal_p.add_argument(
+        "--apply",
+        action="store_true",
+        help="Write calibrated confidence_z to models/predict_config.json",
+    )
+    predict_cal_p.set_defaults(func=_cmd_predict_calibrate_bands)
+
+    csp_p = predict_sub.add_parser(
+        "csp-spread",
+        help="8–9Δ cash-secured put spread advisor (SPX/RUT) with safety gate",
+    )
+    _add_run_dir(csp_p)
+    csp_p.add_argument("--expiry-year", type=int, default=2026)
+    csp_p.add_argument("--expiry-month", type=int, default=7)
+    csp_p.add_argument("--target-delta", type=float, default=0.085)
+    csp_p.add_argument("--spreads", type=int, default=20)
+    csp_p.add_argument("--capital-usd", type=float, default=10000)
+    csp_p.add_argument("--target-credit", type=float, default=200)
+    csp_p.add_argument("--safety-floor", type=float, default=20.0)
+    csp_p.add_argument("--min-safe-prob", type=float, default=0.70, help="Exit when safe prob drops below")
+    csp_p.add_argument(
+        "--entry-min-safe-prob",
+        type=float,
+        default=0.90,
+        help="Min OTM safe prob at entry (Schwab short-leg |delta|)",
+    )
+    csp_p.add_argument(
+        "--spread-width-points",
+        type=float,
+        default=5.0,
+        help="SPX put-spread width in index points (e.g. 6680/6675)",
+    )
+    csp_p.add_argument("--spx-short-strike", type=float, default=None, help="Fixed SPX short strike")
+    csp_p.add_argument("--spx-long-strike", type=float, default=None, help="Fixed SPX long strike")
+    csp_p.add_argument("--credit-lo", type=float, default=0.25, help="Target credit idx pts (low)")
+    csp_p.add_argument("--credit-hi", type=float, default=0.30, help="Target credit idx pts (high)")
+    csp_p.add_argument("--window-days", type=int, default=30)
+    csp_p.add_argument("--years", type=int, default=5)
+    csp_p.add_argument("--backtest", action="store_true", help="Run historical CSP spread sim")
+    csp_p.add_argument(
+        "--schwab-backtest",
+        action="store_true",
+        help="SPX backtest with Schwab ANALYTICAL option credits (requires token)",
+    )
+    csp_p.add_argument("--schwab", action="store_true", help="Attach live Schwab SPX spread quotes to advice")
+    csp_p.add_argument(
+        "--token-path",
+        default=str(Path.home() / "data" / "aitrader" / "secrets" / "schwab_tokens.json"),
+    )
+    csp_p.set_defaults(func=_cmd_csp_spread)
 
     l4_p = sub.add_parser("l4", help="Run L4 end-to-end (predict + backtest + tune)")
     _add_run_dir(l4_p)

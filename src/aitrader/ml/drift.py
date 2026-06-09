@@ -47,6 +47,12 @@ def filter_corpus_by_age(
 
 
 def load_keyword_map(run_dir: Path, sector_id: str) -> list[dict[str, Any]]:
+    if sector_id in ("anchor", "market"):
+        for sid in ("market", "anchor"):
+            path = run_dir / "models" / f"keyword_map_{sid}.json"
+            if path.exists():
+                return json.loads(path.read_text())
+        return []
     path = run_dir / "models" / f"keyword_map_{sector_id}.json"
     if not path.exists():
         return []

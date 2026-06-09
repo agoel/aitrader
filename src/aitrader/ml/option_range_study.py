@@ -107,8 +107,12 @@ def _features_at_day(
     window = _corpus_before(
         corpus, pub_cutoff, window_days=news_window_days, timeline=timeline
     )
-    kw_score, sentiment, top_kw = _signal_from_articles(
-        window, coef_map, llm_cache, max_articles=BACKTEST_SIGNAL_MAX_ARTICLES
+    kw_score, sentiment, top_kw, _ = _signal_from_articles(
+        window,
+        coef_map,
+        llm_cache,
+        max_articles=BACKTEST_SIGNAL_MAX_ARTICLES,
+        run_dir=run_dir,
     )
     cids = _assign_clusters(cluster_model, window)
     dom, profile = _cluster_context_pit(

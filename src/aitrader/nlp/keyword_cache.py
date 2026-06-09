@@ -7,6 +7,8 @@ import re
 from pathlib import Path
 from typing import Any
 
+from aitrader.nlp.stoplist import filter_keywords as _filter_stoplist
+
 EXCLUDE_HINT = (
     "nyse, nasdaq, dow, while, more, move, week, story, recent, gets, taking, according, "
     "said, says, stock, stocks, market, investors, trading, price, shares"
@@ -44,7 +46,7 @@ def normalize_keywords(
             continue
         seen.add(phrase.lower())
         out.append(phrase)
-    return out
+    return _filter_stoplist(out)
 
 
 def load_keyword_cache(run_dir: Path) -> dict[str, dict[str, Any]]:
@@ -79,7 +81,9 @@ def keywords_for_article(
     body = article.get("body", "")
     if cache and article["id"] in cache:
         raw = cache[article["id"]].get("keywords") or []
-        return normalize_keywords(raw, title, body)
+        kws = normalize_keywords(raw, title, body)
+        if kws:
+            return kws
     if article.get("llm_keywords"):
         return normalize_keywords(list(article["llm_keywords"]), title, body)
     return []

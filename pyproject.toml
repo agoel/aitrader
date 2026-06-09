@@ -19,6 +19,8 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = ["pytest>=7.0"]
+finbert = ["transformers>=4.36", "torch>=2.0"]
+schwab = ["cryptography>=41.0"]
 
 [project.scripts]
 aitrader = "aitrader.cli:main"

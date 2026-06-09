@@ -61,6 +61,22 @@ def test_suggest_macro_keywords_grounded() -> None:
     phrases = [k["phrase"] for k in kws]
     assert "rate cut" in phrases or "inflation" in phrases
     assert "nyse" not in phrases
+    assert "what the" not in phrases
+
+
+def test_suggest_macro_keywords_no_title_bigram_fallback() -> None:
+    """Phase 1: no arbitrary title bigrams when macro patterns are sparse."""
+    art = {
+        "id": "y",
+        "title": "Company reports quarterly results",
+        "body": "Shares moved on guidance.",
+        "tickers": [],
+        "sector_id": "macro",
+    }
+    kws = suggest_macro_keywords(art)
+    phrases = [k["phrase"] for k in kws]
+    assert "company reports" not in phrases
+    assert "reports quarterly" not in phrases
 
 
 def test_fill_cursor_batches(tmp_path: Path) -> None:

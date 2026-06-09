@@ -32,6 +32,7 @@ from aitrader.ml.predict_config import DEFAULT_CONFIG, PredictTuneConfig
 from aitrader.ml.strategy_signals import blend_predicted_return
 from aitrader.nlp.cluster import _article_text, _sector_return_profiles
 from aitrader.nlp.keyword_cache import keywords_for_article, load_keyword_cache
+from aitrader.nlp.keyword_tiers import load_tier_coef_maps, signal_tiered_from_articles
 from aitrader.nlp.keywords import (
     HORIZON_TRADING_DAYS,
     _labels_from_corpus,
@@ -364,6 +365,8 @@ def _build_monthly_spy_features(
     corpus = load_corpus(run_dir)
     timeline = _corpus_timeline(corpus)
     cluster_model = _load_cluster_model(run_dir)
+    tier_maps = load_tier_coef_maps(run_dir)
+    use_tiers = bool(tier_maps.get("market"))
     coef_map = _keyword_coef_map(load_keyword_map(run_dir, "anchor"))
     try:
         cot_frame = ensure_cot_data(run_dir)
@@ -404,9 +407,28 @@ def _build_monthly_spy_features(
         window = _corpus_before(
             corpus, pub_cutoff, window_days=news_window_days, timeline=timeline
         )
-        kw_score, sentiment, top_kw = _signal_from_articles(
-            window, coef_map, llm_cache, max_articles=BACKTEST_SIGNAL_MAX_ARTICLES
-        )
+        if use_tiers:
+            tier_scores, sentiment, top_kw, vader_sent = signal_tiered_from_articles(
+                window,
+                tier_maps,
+                llm_cache,
+                sector_id="anchor",
+                max_articles=BACKTEST_SIGNAL_MAX_ARTICLES,
+                run_dir=run_dir,
+            )
+            kw_score = tier_scores.market
+            sector_kw = tier_scores.sector
+            ticker_kw = tier_scores.ticker
+        else:
+            kw_score, sentiment, top_kw, vader_sent = _signal_from_articles(
+                window,
+                coef_map,
+                llm_cache,
+                max_articles=BACKTEST_SIGNAL_MAX_ARTICLES,
+                run_dir=run_dir,
+            )
+            sector_kw = 0.0
+            ticker_kw = 0.0
         cids = _assign_clusters(cluster_model, window)
         dom, profile = _cluster_context_pit(
             run_dir, window, cids, horizon_days=horizon_days, cluster_model=cluster_model
@@ -420,7 +442,11 @@ def _build_monthly_spy_features(
         month_features.append(
             {
                 "keyword_score": kw_score,
+                "market_keyword_score": kw_score,
+                "sector_keyword_score": sector_kw,
+                "ticker_keyword_score": ticker_kw,
                 "sentiment": sentiment,
+                "vader_sentiment": vader_sent,
                 "cluster_prior": _anchor_cluster_prior(profile),
                 "momentum": _momentum_at(spy, as_of),
                 "cot_signal": cot_sig,
@@ -587,8 +613,12 @@ def _build_macro_event_features(
         idx = spy.index.get_loc(td)
         realized = float(spy.iloc[idx + horizon_days] / spy.iloc[idx] - 1.0)
         window = _corpus_before(corpus, pub_cutoff, window_days=7, timeline=timeline)
-        kw_score, sentiment, top_kw = _signal_from_articles(
-            window, coef_map, llm_cache, max_articles=BACKTEST_SIGNAL_MAX_ARTICLES
+        kw_score, sentiment, top_kw, vader_sent = _signal_from_articles(
+            window,
+            coef_map,
+            llm_cache,
+            max_articles=BACKTEST_SIGNAL_MAX_ARTICLES,
+            run_dir=run_dir,
         )
         cids = _assign_clusters(cluster_model, window)
         dom, profile = _cluster_context_pit(

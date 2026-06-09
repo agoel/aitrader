@@ -15,6 +15,7 @@ from aitrader.nlp.keyword_cache import (
     normalize_keywords,
     phrase_grounded,
 )
+from aitrader.nlp.stoplist import is_stoplisted
 from aitrader.nlp.parallel import default_workers, parallel_map
 from aitrader.progress import RunProgress, parallel_map_progress
 from aitrader.nlp.news import load_corpus
@@ -73,7 +74,9 @@ def suggest_macro_keywords(article: dict[str, Any]) -> list[dict[str, str]]:
 
     def add(phrase: str, kw_type: str) -> None:
         p = re.sub(r"\s+", " ", phrase.strip().lower())
-        if not p or p in seen or any(w in _EXCLUDE_WORDS for w in p.split()):
+        if not p or p in seen or is_stoplisted(p):
+            return
+        if any(w in _EXCLUDE_WORDS for w in p.split()):
             return
         if not phrase_grounded(p, title, body):
             return
@@ -106,10 +109,6 @@ def suggest_macro_keywords(article: dict[str, Any]) -> list[dict[str, str]]:
     sector = str(article.get("sector_id") or "").replace("_", " ")
     if sector and sector != "macro" and sector.lower() in hay:
         add(sector, "sector")
-
-    if len(found) < 3:
-        for i in range(min(3, len(title_tokens) - 1)):
-            add(f"{title_tokens[i]} {title_tokens[i + 1]}", "sector")
 
     out: list[dict[str, str]] = []
     for phrase, kw_type in found[:8]:

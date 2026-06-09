@@ -1,0 +1,19 @@
+---
+description: Schwab API is quotes-only — never place orders or trade from this repo
+globs:
+  - src/aitrader/data/schwab.py
+  - src/aitrader/ml/csp_spread*.py
+  - src/aitrader/cli.py
+alwaysApply: true
+---
+
+# Schwab API — quotes only, no trading
+
+**Mandatory policy for all agents and code changes:**
+
+1. **Never place orders.** Do not call Schwab Accounts & Trading API, `/orders`, `/accounts`, or any endpoint that creates, modifies, or cancels trades.
+2. **Market data only.** Allowed: OAuth token exchange, `/marketdata/v1` quotes, option chains, price history, market hours.
+3. **No agent execution.** The assistant must not trade any amount of money on the user's behalf. Output recommendations and live quotes only; the user executes manually in Schwab/TOS.
+4. **Do not add trading features** even if the user later asks, unless they explicitly revoke this policy in writing and the codebase policy is updated first.
+
+Enforced in code: `assert_quotes_only_url()` in `src/aitrader/data/schwab.py`.
