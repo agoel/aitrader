@@ -15,6 +15,7 @@ from aitrader.ml.csp_spread_advisor import (
     backtest_csp_spreads,
     backtest_csp_spreads_spx_schwab,
 )
+from aitrader.ml.csp_portfolio_backtest import run_csp_portfolio_backtest
 from aitrader.ml.option_range_study import run_option_range_study
 from aitrader.ml.portfolio_backtest import compare_portfolio_schedules, run_spy_portfolio_backtest
 from aitrader.ml.learn_predict import run_prediction_tune
@@ -411,6 +412,30 @@ def _cmd_csp_spread(args: argparse.Namespace) -> None:
         spx_short_strike=args.spx_short_strike,
         spx_long_strike=args.spx_long_strike,
     )
+    if args.portfolio_backtest:
+        _df, summary, report, chart, cum_csv = run_csp_portfolio_backtest(
+            args.run_dir,
+            params=params,
+            news_window_days=args.window_days,
+            lookback_years=args.years,
+            start_equity=args.capital_usd,
+            schwab_spot_check=not args.no_schwab_spot_check,
+            token_path=args.token_path,
+            utilization_tier=args.utilization_tier,
+            entry_pricing=args.entry_pricing,
+        )
+        print(f"Wrote {report}")
+        print(f"Chart {chart}")
+        print(f"Cumulative table {cum_csv}")
+        print(
+            f"Portfolio backtest ({summary['lookback_years']}y Tier {summary['tier']}, "
+            f"entry={summary['entry_pricing']}): "
+            f"util {summary['utilization_pct']}% | "
+            f"assigned {summary['assignment_rate_pct']}% | "
+            f"combined ${summary['combined_final_equity']:,.0f} | "
+            f"CAGR {summary['combined_cagr_pct']}%"
+        )
+        return
     if args.schwab_backtest:
         _df, summary, report = backtest_csp_spreads_spx_schwab(
             args.run_dir,
@@ -1230,11 +1255,33 @@ def main(argv: list[str] | None = None) -> None:
     )
     csp_p.add_argument("--spx-short-strike", type=float, default=None, help="Fixed SPX short strike")
     csp_p.add_argument("--spx-long-strike", type=float, default=None, help="Fixed SPX long strike")
-    csp_p.add_argument("--credit-lo", type=float, default=0.25, help="Target credit idx pts (low)")
+    csp_p.add_argument("--credit-lo", type=float, default=0.20, help="Target credit idx pts (low)")
     csp_p.add_argument("--credit-hi", type=float, default=0.30, help="Target credit idx pts (high)")
     csp_p.add_argument("--window-days", type=int, default=30)
     csp_p.add_argument("--years", type=int, default=5)
     csp_p.add_argument("--backtest", action="store_true", help="Run historical CSP spread sim")
+    csp_p.add_argument(
+        "--portfolio-backtest",
+        action="store_true",
+        help="10y compounding CSP portfolio backtest (Black-Scholes pricing)",
+    )
+    csp_p.add_argument(
+        "--utilization-tier",
+        choices=["A", "B"],
+        default="B",
+        help="A=strict gates (SELL/WIDEN only); B=trade unless crash_veto",
+    )
+    csp_p.add_argument(
+        "--entry-pricing",
+        choices=["black_scholes", "schwab_analytical"],
+        default="black_scholes",
+        help="Entry spread pricing: local BS or Schwab ANALYTICAL (exit always BS)",
+    )
+    csp_p.add_argument(
+        "--no-schwab-spot-check",
+        action="store_true",
+        help="Skip Schwab ANALYTICAL spot-check during portfolio backtest",
+    )
     csp_p.add_argument(
         "--schwab-backtest",
         action="store_true",

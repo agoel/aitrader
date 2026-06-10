@@ -68,7 +68,7 @@ class CSPSpreadParams:
     entry_min_safe_prob: float = 0.90  # require ≥90% OTM at entry (|delta| ≤ 10%)
     max_entry_safe_prob: float = 0.93  # ignore phantom far-OTM marks (>93% safe, ~0.05 credit in TOS)
     min_short_delta: float = 0.075  # ~7.5Δ floor — 0.25 credit not available below ~92.5% OTM
-    target_credit_band: tuple[float, float] = (0.25, 0.30)
+    target_credit_band: tuple[float, float] = (0.20, 0.30)
     spx_short_strike: float | None = None
     spx_long_strike: float | None = None
 
@@ -216,6 +216,44 @@ def csp_action_gate(
         if safety_score >= params.caution_floor:
             return "WIDEN"
     return "SKIP"
+
+
+def tier_a_action(
+    base_action: Literal["SELL", "WIDEN", "SKIP", "SELL_OTM"],
+    *,
+    crash_veto: bool,
+) -> tuple[Literal["SELL", "WIDEN", "SKIP", "SELL_OTM"], bool]:
+    """Utilization tier A: trade only when model gates pass (SELL / WIDEN / SELL_OTM)."""
+    if crash_veto or base_action == "SKIP":
+        return "SKIP", False
+    return base_action, True
+
+
+def tier_b_action(
+    base_action: Literal["SELL", "WIDEN", "SKIP", "SELL_OTM"],
+    *,
+    crash_veto: bool,
+) -> tuple[Literal["SELL", "WIDEN", "SKIP", "SELL_OTM"], bool]:
+    """Utilization tier B: trade unless crash_veto; default marginal months to WIDEN."""
+    if crash_veto:
+        return "SKIP", False
+    if base_action == "SKIP":
+        return "WIDEN", True
+    return base_action, True
+
+
+UtilizationTier = Literal["A", "B"]
+
+
+def apply_utilization_tier(
+    base_action: Literal["SELL", "WIDEN", "SKIP", "SELL_OTM"],
+    *,
+    crash_veto: bool,
+    tier: UtilizationTier = "B",
+) -> tuple[Literal["SELL", "WIDEN", "SKIP", "SELL_OTM"], bool]:
+    if tier == "A":
+        return tier_a_action(base_action, crash_veto=crash_veto)
+    return tier_b_action(base_action, crash_veto=crash_veto)
 
 
 def csp_safety_score(

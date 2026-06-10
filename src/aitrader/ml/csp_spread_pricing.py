@@ -181,6 +181,35 @@ def pick_furthest_credit_band_spread(
     return best
 
 
+def fetch_index_chain(
+    client: SchwabClient,
+    index: str,
+    expiry: date | None = None,
+    *,
+    analytical: bool = False,
+    underlying_price: float | None = None,
+    volatility: float | None = None,
+    days_to_expiration: int | None = None,
+) -> dict[str, Any]:
+    """Fetch option chain. ANALYTICAL mode uses DTE/spot/vol only (no calendar dates)."""
+    strategy = "ANALYTICAL" if analytical else None
+    strike_count = 50 if analytical else SPX_CHAIN_STRIKE_COUNT
+    from_date = None if analytical else expiry
+    to_date = None if analytical else expiry
+    return client.option_chain(
+        index,
+        contract_type="PUT",
+        from_date=from_date,
+        to_date=to_date,
+        strike_count=strike_count,
+        strategy=strategy,
+        underlying_price=underlying_price,
+        volatility=volatility,
+        days_to_expiration=days_to_expiration,
+        include_quotes=not analytical,
+    )
+
+
 def fetch_spx_chain(
     client: SchwabClient,
     expiry: date,
@@ -190,18 +219,72 @@ def fetch_spx_chain(
     volatility: float | None = None,
     days_to_expiration: int | None = None,
 ) -> dict[str, Any]:
-    strategy = "ANALYTICAL" if analytical else None
-    return client.option_chain(
+    return fetch_index_chain(
+        client,
         "SPX",
-        contract_type="PUT",
-        from_date=expiry,
-        to_date=expiry,
-        strike_count=50 if analytical else SPX_CHAIN_STRIKE_COUNT,
-        strategy=strategy,
+        expiry,
+        analytical=analytical,
         underlying_price=underlying_price,
         volatility=volatility,
         days_to_expiration=days_to_expiration,
     )
+
+
+def fetch_index_put_spread(
+    client: SchwabClient,
+    index: str,
+    *,
+    expiry: date,
+    target_credit_lo: float = 0.20,
+    target_credit_hi: float = 0.30,
+    spread_width: float = SPX_DEFAULT_SPREAD_WIDTH,
+    entry_min_safe_prob: float = 0.90,
+    max_entry_safe_prob: float = 0.93,
+    min_short_delta: float = 0.075,
+    analytical: bool = False,
+    underlying_price: float | None = None,
+    volatility: float | None = None,
+    days_to_expiration: int | None = None,
+    short_strike: float | None = None,
+    long_strike: float | None = None,
+) -> PutSpreadQuote | None:
+    """Live or analytical Schwab chain for index bull put spread (SPX or RUT)."""
+    chain = fetch_index_chain(
+        client,
+        index,
+        expiry,
+        analytical=analytical,
+        underlying_price=underlying_price,
+        volatility=volatility,
+        days_to_expiration=days_to_expiration,
+    )
+    exp_str = expiry.isoformat()
+    if short_strike is not None and long_strike is not None:
+        q = quote_spx_spread_at_strikes(
+            chain,
+            short_strike=short_strike,
+            long_strike=long_strike,
+            expiry=exp_str if not analytical else None,
+            min_safe_prob=entry_min_safe_prob,
+        )
+        if q and not (target_credit_lo <= q.credit_mid <= target_credit_hi):
+            return None
+        if q:
+            q.pricing_source = "schwab_analytical" if analytical else "schwab_chain"
+        return q
+    q = pick_furthest_credit_band_spread(
+        chain,
+        spread_width=spread_width,
+        credit_lo=target_credit_lo,
+        credit_hi=target_credit_hi,
+        entry_min_safe_prob=entry_min_safe_prob,
+        max_entry_safe_prob=max_entry_safe_prob,
+        min_short_delta=min_short_delta,
+        expiry=None if analytical else exp_str,
+    )
+    if q and analytical:
+        q.pricing_source = "schwab_analytical"
+    return q
 
 
 def fetch_spx_put_spread(
@@ -223,35 +306,22 @@ def fetch_spx_put_spread(
     long_strike: float | None = None,
 ) -> PutSpreadQuote | None:
     """Live or analytical Schwab chain for SPX bull put spread."""
-    chain = fetch_spx_chain(
+    return fetch_index_put_spread(
         client,
-        expiry,
+        "SPX",
+        expiry=expiry,
+        target_credit_lo=target_credit_lo,
+        target_credit_hi=target_credit_hi,
+        spread_width=spread_width,
+        entry_min_safe_prob=entry_min_safe_prob,
+        max_entry_safe_prob=max_entry_safe_prob,
+        min_short_delta=min_short_delta,
         analytical=analytical,
         underlying_price=underlying_price,
         volatility=volatility,
         days_to_expiration=days_to_expiration,
-    )
-    exp_str = expiry.isoformat()
-    if short_strike is not None and long_strike is not None:
-        q = quote_spx_spread_at_strikes(
-            chain,
-            short_strike=short_strike,
-            long_strike=long_strike,
-            expiry=exp_str,
-            min_safe_prob=entry_min_safe_prob,
-        )
-        if q and not (target_credit_lo <= q.credit_mid <= target_credit_hi):
-            return None
-        return q
-    return pick_furthest_credit_band_spread(
-        chain,
-        spread_width=spread_width,
-        credit_lo=target_credit_lo,
-        credit_hi=target_credit_hi,
-        entry_min_safe_prob=entry_min_safe_prob,
-        max_entry_safe_prob=max_entry_safe_prob,
-        min_short_delta=min_short_delta,
-        expiry=exp_str,
+        short_strike=short_strike,
+        long_strike=long_strike,
     )
 
 
